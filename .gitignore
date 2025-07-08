@@ -1,0 +1,6 @@
+Methane_dataset/data/
+Methane_dataset/processed_data/
+Methane_dataset/methane/
+Methane_dataset/code/model_training/Time-Series-Library-main/
+Methane_dataset/code/model_training/log/
+*.pyc
