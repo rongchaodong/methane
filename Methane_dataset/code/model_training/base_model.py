@@ -9,6 +9,8 @@ import logging
 from config import Config
 from model import LSTM, MyEALSTM, MultiTCN, Transformer, iTransformer, Pyraformer
 
+from hybrid import LSTM_Transformer
+
 class Dataset(Dataset):
     def __init__(self, x, y):
         self.x = x
@@ -76,6 +78,8 @@ elif args.model == 'itransformer':
     model = iTransformer(config).to(config.device)
 elif args.model == 'pyraformer':
     model = Pyraformer(config).to(config.device)
+elif args.model == 'hybrid':
+    model = LSTM_Transformer(config).to(config.device)
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
 train_loss_list, test_loss_list, r2_list = [], [], []
