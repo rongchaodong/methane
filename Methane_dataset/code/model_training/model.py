@@ -219,7 +219,7 @@ class Transformer(nn.Module):
         super(Transformer, self).__init__()
         self.embedding = nn.Linear(config.input_size, config.hidden_size)  
         self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=config.hidden_size, nhead=5), 
+            nn.TransformerEncoderLayer(d_model=config.hidden_size, nhead=4), 
             num_layers=config.num_layers
         )
         self.fc_out = nn.Linear(config.hidden_size, config.output_size) 

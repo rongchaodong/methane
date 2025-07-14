@@ -108,7 +108,7 @@ logger.info(json.dumps(vars(args), indent=4))
 train_loss_list, test_loss_list, nrmse_list, r2_list = [], [], [], []
 r2_max = -10.0
 
-MODEL_PATH = '../model_save/pyraformer/base_model.pth'
+MODEL_PATH = f'../model_save/{args.model}/base_model.pth'
 model.load_state_dict(torch.load(MODEL_PATH))
 
 model.eval()  
