@@ -120,7 +120,10 @@ for epoch in range(args.epoch):
         if torch.isnan(batch_X).any():
             continue
         _, prediction = model(batch_X)
-        loss = criterion(batch_y, prediction)
+        # print("prediction shape:", prediction.shape)
+        # print("batch_y shape:", batch_y.shape)
+
+        loss = criterion(prediction, batch_y)  # 保证 shape: [B, 1]
 
         optimizer.zero_grad()
         loss.backward()
