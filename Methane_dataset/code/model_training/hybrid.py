@@ -38,7 +38,7 @@ class Transformer(nn.Module):
 class LSTM_Transformer(nn.Module):
     def __init__(self, config):
         super(LSTM_Transformer, self).__init__()
-        self.lstm = nn.LSTM(config.input_size, config.hidden_size, num_layers=2, batch_first=True)
+        self.lstm = nn.LSTM(config.input_size, config.hidden_size, num_layers=3, batch_first=True)
 
         # Fixed positional embedding
         pe = torch.zeros(config.seq_len, config.hidden_size)
