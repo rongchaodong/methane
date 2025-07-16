@@ -35,3 +35,7 @@ class Config:
         self.output_attention = False
         self.pred_len = 365
         self.task_name = 'long_term_forecast'
+        # --- NEW: Hierarchical Model Config ---
+        self.max_num_years = 40  # 训练+测试的总年份跨度，用于位置编码
+        self.meta_n_heads = 2      # 元转换器的头数
+        self.meta_num_layers = 2   # 元转换器的层数
