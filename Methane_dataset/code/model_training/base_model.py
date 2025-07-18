@@ -82,6 +82,7 @@ parser.add_argument("--simulated", type=bool, default=True, help="training simul
 parser.add_argument("--model", type=str, help="Model selection")
 parser.add_argument("--epoch", type=int, default=100, help="Training epoches")
 parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
+parser.add_argument("--trans", type=bool, default=False, help="training hybrid with trans or not")
 args = parser.parse_args()
 
 config = Config()
@@ -129,7 +130,7 @@ def train(epoches : int, train_dataloader: DataLoader, test_dataloader: DataLoad
         for batch_X, batch_y, batch_year_indices in train_dataloader:
             if torch.isnan(batch_X).any():
                 continue
-            _, prediction = model(batch_X, batch_year_indices)
+            _, prediction = model(batch_X, batch_year_indices, args.trans)
             # print("prediction shape:", prediction.shape)
             # print("batch_y shape:", batch_y.shape)
 
@@ -151,7 +152,7 @@ def train(epoches : int, train_dataloader: DataLoader, test_dataloader: DataLoad
         all_targets = []
         with torch.no_grad():
             for batch_X, batch_y, batch_year_indices in test_dataloader:
-                _, prediction = model(batch_X, batch_year_indices)
+                _, prediction = model(batch_X, batch_year_indices, args.trans)
                 all_predictions.append(prediction.cpu().numpy().reshape(-1))
                 all_targets.append(batch_y.cpu().numpy().reshape(-1))
 
