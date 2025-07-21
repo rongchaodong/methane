@@ -47,12 +47,12 @@ class Contextual_LSTM_Transformer(nn.Module):
         super(Contextual_LSTM_Transformer, self).__init__()
         self.config = config
 
-        # self.base_lstm = nn.LSTM(config.input_size, config.hidden_size, num_layers=3, batch_first=True)
-        self.base_model = LSTM_Transformer(config)
+        self.base_model = nn.LSTM(config.input_size, config.hidden_size, num_layers=3, batch_first=True)
+        # self.base_model = LSTM_Transformer(config)
 
         # max_num_years 
         self.year_embedding = nn.Embedding(num_embeddings=config.max_num_years, embedding_dim=config.hidden_size)
-        self.context_tokens = nn.Parameter(torch.randn(4, config.hidden_size))  # (M, H)
+        self.context_tokens = nn.Parameter(torch.randn(2, config.hidden_size))  # (M, H)
 
         # attention
         self.attention = nn.MultiheadAttention(
@@ -82,7 +82,7 @@ class Contextual_LSTM_Transformer(nn.Module):
         # x shape: (B, T, H_in) -> (128, 365, 15)
         # year_indices shape: (B) -> (128)
         
-        daily_features, _ = self.base_model(x, True) # daily_features shape: (B, T, H)
+        daily_features, _ = self.base_model(x) # daily_features shape: (B, T, H)
         daily_features = self.norm(daily_features)
 
         # query_vector = self.year_embedding(year_indices) # Shape: (B, H)
