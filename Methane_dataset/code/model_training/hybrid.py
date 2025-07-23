@@ -42,75 +42,53 @@ class LSTM_Transformer(nn.Module):
         return out, out
 
 
+
 class Contextual_LSTM_Transformer(nn.Module):
+    """
+    Improved inter-year dependency: use year embeddings to initialize LSTM hidden state,
+    so the base LSTM dynamics adapt per-year without requiring a separate Transformer for fusion.
+    """
     def __init__(self, config):
         super(Contextual_LSTM_Transformer, self).__init__()
         self.config = config
 
-        self.base_model = nn.LSTM(config.input_size, config.hidden_size, num_layers=3, batch_first=True)
-        # self.base_model = LSTM_Transformer(config)
+        # Embedding for each global year index
+        self.year_embedding = nn.Embedding(
+            num_embeddings=config.max_num_years,
+            embedding_dim=config.hidden_size
+        )
 
-        # max_num_years 
-        self.year_embedding = nn.Embedding(num_embeddings=config.max_num_years, embedding_dim=config.hidden_size)
-        self.context_tokens = nn.Parameter(torch.randn(2, config.hidden_size))  # (M, H)
-
-        # attention
-        self.attention = nn.MultiheadAttention(
-            embed_dim=config.hidden_size, 
-            num_heads=1,
+        # Base LSTM for daily time series
+        self.base_model = nn.LSTM(
+            input_size=config.input_size,
+            hidden_size=config.hidden_size,
+            num_layers=config.num_layers,
             batch_first=True
         )
 
-        self.fusion_proj = nn.Linear(config.hidden_size * 2, config.hidden_size)
-        self.fusion_transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=config.hidden_size,
-                nhead=1,
-                batch_first=True,
-                norm_first=True
-            ),
-            num_layers=1
-        )
+        # Final output layer
+        self.fc_out = nn.Linear(config.hidden_size, config.output_size)
 
-        self.fc_out = nn.Linear(config.hidden_size *2, config.output_size)
-        self.fc_out_trans = nn.Linear(config.hidden_size, config.output_size)
-        
+        # Normalization & dropout
         self.norm = nn.LayerNorm(config.hidden_size)
-        self.dropout = nn.Dropout(0.1)
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x, year_indices, with_trans: bool = False):
-        # x shape: (B, T, H_in) -> (128, 365, 15)
-        # year_indices shape: (B) -> (128)
-        
-        daily_features, _ = self.base_model(x) # daily_features shape: (B, T, H)
+        # x: (B, T, input_size)
+        B, T, _ = x.size()
+
+        # Lookup year embedding and project to initialize LSTM states
+        year_emb = self.year_embedding(year_indices)        # (B, H)
+        # Create initial hidden and cell states: (num_layers, B, H)
+        h0 = year_emb.unsqueeze(0).repeat(self.config.num_layers, 1, 1)
+        c0 = torch.zeros_like(h0)
+
+        # Base LSTM with custom init
+        daily_features, _ = self.base_model(x, (h0.to(x.device), c0.to(x.device)))  # (B, T, H)
         daily_features = self.norm(daily_features)
 
-        # query_vector = self.year_embedding(year_indices) # Shape: (B, H)
-        # query_vector = query_vector.unsqueeze(1) # Shape: (B, 1, H)
+        # Direct output
+        out = self.fc_out(self.dropout(daily_features)).squeeze(-1)  # (B, T)
 
-        # all_year_indices = torch.arange(0, self.config.max_num_years).to(self.config.device)
-        # memory_bank = self.year_embedding(all_year_indices) # Shape: (max_years, H)
-        # memory_bank = memory_bank.unsqueeze(0).expand(x.size(0), -1, -1) # Shape: (B, max_years, H)
-        # Q: query_vector, K: memory_bank, V: memory_bank
-        # context_vector, _ = self.attention(
-        #     query=query_vector,
-        #     key=memory_bank,
-        #     value=memory_bank
-        # ) # context_vector shape: (B, 1, H)
-
-        query_vector = daily_features.mean(dim=1, keepdim=True)  # (B, 1, H)
-        context = self.context_tokens.unsqueeze(0).expand(x.size(0), -1, -1)  # (B, M, H)
-        context_vector, _ = self.attention(query=query_vector, key=context, value=context)
-
-        context_expanded = context_vector.expand(-1, x.size(1), -1) # Shape: (B, T, H)
-
-        enhanced_features = torch.cat([daily_features, context_expanded], dim=2) # Shape: (B, T, 2*H)
-
-        if with_trans:
-            enhanced_features = self.fusion_proj(enhanced_features)
-            enhanced_features = self.fusion_transformer(enhanced_features)
-            out = self.fc_out_trans(self.dropout(enhanced_features)).squeeze(-1) # (B, T)
-        else:
-            out = self.fc_out(self.dropout(enhanced_features)).squeeze(-1) # (B, T)
-        
         return out, out
+
