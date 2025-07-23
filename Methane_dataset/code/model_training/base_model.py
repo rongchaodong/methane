@@ -195,6 +195,13 @@ def main():
     if args.simulated:
         if args.type == "temporal":
             if args.model == 'hierachy':
+                    # #testing
+                    # train_years = range(1979, 1999)
+                    # train_dataset = TemporalDataset(train_years)
+                    # print(train_dataset.cumsum_lengths)
+                    # print(train_dataset.data_lengths)
+
+                    # exit()
                     all_years = range(1979, 2019)
                     warm_up = 1979 + config.num_context_years
                     train_years = range(warm_up, 1999)

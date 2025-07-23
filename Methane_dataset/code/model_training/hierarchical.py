@@ -76,10 +76,13 @@ class HierarchicalTemporalDataset(Dataset):
         year_list_idx = np.searchsorted(self.cumsum_lengths, idx, side="right") - 1
         file_idx = idx - self.cumsum_lengths[year_list_idx]
         actual_year = self.target_years[year_list_idx]
+        print("year_list_idx", year_list_idx, " year:", actual_year, " data length: ", self.data_lengths[year_list_idx])
+        print("file idx:", file_idx)
 
         # 2. 准备 X_daily 和 Y_target
         # 加载对应样本的完整输入数据
         full_input_sample = np.load(self.input_files[actual_year], mmap_mode='r')[file_idx]
+        print("this year data:", full_input_sample[0])
         
         # 归一化整个样本
         normalized_input = (full_input_sample - self.mean_vals) / self.std_vals
@@ -94,6 +97,7 @@ class HierarchicalTemporalDataset(Dataset):
         context_vectors = []
         for i in range(1, self.config.num_context_years + 1):
             context_year = actual_year - i
+            print("context year", context_year, " context year length", self.data_lengths[year_list_idx - i])
             
             # 处理边界情况：如果需要的历史年份超出了数据范围，我们使用已知最早年份的数据作为填充
             if context_year in self.yearly_features_cache:
@@ -101,12 +105,14 @@ class HierarchicalTemporalDataset(Dataset):
             else:
                 earliest_year = self.all_available_years[0]
                 vec = self.yearly_features_cache[earliest_year][file_idx]
+            print("context vec of :", context_year, " ", vec)
             context_vectors.append(vec)
         
         # 将向量列表堆叠成一个张量
         x_yearly = torch.stack(context_vectors)
         print("target", y_target.shape)
         print("x_daily", x_daily.shape)
+        print("year_daily", x_yearly.shape)
         exit()
 
         return (
