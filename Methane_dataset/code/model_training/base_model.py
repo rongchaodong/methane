@@ -12,6 +12,8 @@ from model import LSTM, MyEALSTM, MultiTCN, Transformer, iTransformer, Pyraforme
 
 from hybrid import LSTM_Transformer, Contextual_LSTM_Transformer
 
+from hierarchical import HierarchicalTemporalDataset, Hierarchical
+
 class Dataset(Dataset):
     def __init__(self, x, y):
         self.x = x
@@ -113,6 +115,8 @@ elif args.model == 'pyraformer':
 elif args.model == 'hybrid':
     # model = LSTM_Transformer(config).to(config.device)
     model = Contextual_LSTM_Transformer(config).to(config.device)
+elif args.model == 'hierachy':
+    model = Hierarchical(10, 8, 5, 8, 1).to(config.device)
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
 
@@ -127,12 +131,12 @@ def train(epoches : int, train_dataloader: DataLoader, test_dataloader: DataLoad
         logger.info(f'Epoch {epoch}: Training start.')
         running_loss = 0.0
         model.train()
-        for batch_X, batch_y, batch_year_indices in train_dataloader:
-            if torch.isnan(batch_X).any():
+        for batch_X_daily, batch_x_yearly, batch_y in train_dataloader:
+            if torch.isnan(batch_X_daily).any():
                 continue
-            _, prediction = model(batch_X, batch_year_indices, args.trans)
-            # print("prediction shape:", prediction.shape)
-            # print("batch_y shape:", batch_y.shape)
+            _, prediction = model(batch_X_daily, batch_x_yearly)
+            print("prediction shape:", prediction.shape)
+            print("batch_y shape:", batch_y.shape)
 
             loss = criterion(prediction, batch_y)  # 保证 shape: [B, 1]
 
@@ -190,12 +194,22 @@ def train(epoches : int, train_dataloader: DataLoader, test_dataloader: DataLoad
 def main():
     if args.simulated:
         if args.type == "temporal":
-            train_years = range(1979, 1999)
-            train_dataset = TemporalDataset(train_years)
-            train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-            test_years = range(1999, 2019)
-            test_dataset = TemporalDataset(test_years)
-            test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=True)
+            if args.model == 'hierachy':
+                    all_years = range(1979, 2019)
+                    warm_up = 1979 + config.num_context_years
+                    train_years = range(warm_up, 1999)
+                    test_years = range(1999, 2019)
+                    train_dataset = HierarchicalTemporalDataset(train_years, config, all_years)
+                    train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+                    test_dataset = HierarchicalTemporalDataset(test_years, config, all_years)
+                    test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
+            else: # hybrid
+                train_years = range(1979, 1999)
+                train_dataset = TemporalDataset(train_years)
+                train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+                test_years = range(1999, 2019)
+                test_dataset = TemporalDataset(test_years)
+                test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
             # model train
             train(args.epoch, train_dataloader, test_dataloader)         
         else: # simulated spatial dataset

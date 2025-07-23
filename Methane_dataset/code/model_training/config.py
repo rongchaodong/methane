@@ -40,3 +40,5 @@ class Config:
         self.meta_n_heads = 1      # 元转换器的头数
         self.meta_num_layers = 1   # 元转换器的层数
         self.att_inter_years = 2
+
+        self.num_context_years = 5
