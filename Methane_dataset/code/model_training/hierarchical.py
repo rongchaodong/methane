@@ -32,8 +32,8 @@ class HierarchicalTemporalDataset(Dataset):
         self.K_fast = 5  # 5个快特征
 
         # --- 文件路径和归一化统计数据 ---
-        self.input_files = {year: f"../../processed_data/TEM-MDM/temporal/input_{year}.npy" for year in self.all_available_years}
-        self.output_files = {year: f"../../processed_data/TEM-MDM/temporal/output_{year}.npy" for year in self.target_years}
+        self.input_files = {year: f"../../processed_data/TEM-MDM/sequence/temporal/input_{year}.npy" for year in self.all_available_years}
+        self.output_files = {year: f"../../processed_data/TEM-MDM/sequence/temporal/output_{year}.npy" for year in self.target_years}
         self.mean_vals = np.load('../../data/TEM-MDM/mean_vals.npy')
         self.std_vals = np.load('../../data/TEM-MDM/std_vals.npy')
 
@@ -65,7 +65,7 @@ class HierarchicalTemporalDataset(Dataset):
             
             # 归一化并存入缓存
             normalized_slow_features = (slow_features_for_year - mean_slow) / std_slow
-            cache[year] = torch.tensor(normalized_slow_features, dtype=torch.float32)
+            cache[year] = normalized_slow_features.detach()
         return cache
 
     def __len__(self):
@@ -76,16 +76,17 @@ class HierarchicalTemporalDataset(Dataset):
         year_list_idx = np.searchsorted(self.cumsum_lengths, idx, side="right") - 1
         file_idx = idx - self.cumsum_lengths[year_list_idx]
         actual_year = self.target_years[year_list_idx]
-        print("year_list_idx", year_list_idx, " year:", actual_year, " data length: ", self.data_lengths[year_list_idx])
-        print("file idx:", file_idx)
+        # print("year_list_idx", year_list_idx, " year:", actual_year, " data length: ", self.data_lengths[year_list_idx])
+        # print("file idx:", file_idx)
 
         # 2. 准备 X_daily 和 Y_target
         # 加载对应样本的完整输入数据
         full_input_sample = np.load(self.input_files[actual_year], mmap_mode='r')[file_idx]
-        print("this year data:", full_input_sample[0])
+        # print("this year data:", full_input_sample[0])
         
         # 归一化整个样本
         normalized_input = (full_input_sample - self.mean_vals) / self.std_vals
+        # print("this year data:", normalized_input[0][:10])
         
         # 切分出快特征作为 X_daily
         x_daily = normalized_input[:, self.K_slow:]
@@ -97,7 +98,10 @@ class HierarchicalTemporalDataset(Dataset):
         context_vectors = []
         for i in range(1, self.config.num_context_years + 1):
             context_year = actual_year - i
-            print("context year", context_year, " context year length", self.data_lengths[year_list_idx - i])
+            # print(self.mean_vals.shape)
+            # print(self.std_vals.shape)
+            # print("context year", context_year, " context year length", self.data_lengths[year_list_idx - i])
+            # print("context year true data:", np.load(self.input_files[context_year], mmap_mode='r')[file_idx][0][:10])
             
             # 处理边界情况：如果需要的历史年份超出了数据范围，我们使用已知最早年份的数据作为填充
             if context_year in self.yearly_features_cache:
@@ -105,19 +109,19 @@ class HierarchicalTemporalDataset(Dataset):
             else:
                 earliest_year = self.all_available_years[0]
                 vec = self.yearly_features_cache[earliest_year][file_idx]
-            print("context vec of :", context_year, " ", vec)
+            # print("context vec of :", context_year, " ", vec)
             context_vectors.append(vec)
         
         # 将向量列表堆叠成一个张量
         x_yearly = torch.stack(context_vectors)
-        print("target", y_target.shape)
-        print("x_daily", x_daily.shape)
-        print("year_daily", x_yearly.shape)
-        exit()
+        # print("target", y_target.shape)
+        # print("x_daily", x_daily.shape)
+        # print("year_daily", x_yearly.shape)
+        # exit()
 
         return (
             torch.tensor(x_daily, dtype=torch.float32).to(config.device),
-            torch.tensor(x_yearly, dtype=torch.float32).to(config.device),
+            x_yearly.to(config.device),
             torch.tensor(y_target, dtype=torch.float32).to(config.device)
         )
 
@@ -129,74 +133,88 @@ class AnnualEncoder(nn.Module):
 
     def forward(self, x_yearly):
         _, h_n = self.gru(x_yearly)
+        # print("GRU shape:", h_n.shape, h_n.squeeze(0).shape)
         return h_n.squeeze(0)
 
-# 交叉注意力模块
 class CrossAttention(nn.Module):
-    """
-    一个简单的交叉注意力模块，用于计算日度解码器状态和年度上下文之间的对齐。
-    """
     def __init__(self, daily_hidden_dim, annual_context_dim):
         super(CrossAttention, self).__init__()
-        # 线性层，将日度隐藏状态（查询）映射到与年度上下文（键）相同的维度
         self.query_layer = nn.Linear(daily_hidden_dim, annual_context_dim)
-        
-    def forward(self, daily_hidden, annual_context):
-        # daily_hidden (query): (batch_size, daily_hidden_dim)
-        # annual_context (key/value): (batch_size, annual_context_dim)
-        
-        # 1. 投射查询
-        query = self.query_layer(daily_hidden) # -> (batch_size, annual_context_dim)
-        
-        # 2. 计算注意力分数 (scaled dot-product)
-        # 为了进行批处理矩阵乘法，我们需要增加一个维度
-        query = query.unsqueeze(1) # -> (batch_size, 1, annual_context_dim)
-        # 将 annual_context 视为只有一个键/值对的序列
-        annual_context_unsqueezed = annual_context.unsqueeze(2) # -> (batch_size, annual_context_dim, 1)
-        
-        # energy 的形状: (batch_size, 1, 1)
-        energy = torch.bmm(query, annual_context_unsqueezed)
-        
-        # 在这个简单的场景下，只有一个注意力权重，恒为1，softmax是可选的
-        # 但为了通用性，我们保留它
-        attention_weights = F.softmax(energy, dim=-1)
-        
-        # 3. 计算加权上下文
-        # attended_context 的形状: (batch_size, 1, annual_context_dim)
-        attended_context = torch.bmm(attention_weights, annual_context.unsqueeze(1))
-        
-        return attended_context.squeeze(1), attention_weights.squeeze()
 
-# 日度解码器
+    def forward(self, daily_hidden, annual_context):
+        # daily_hidden: [B, 365, H_d]
+        # annual_context: [B, H_y]
+        B, T, H_d = daily_hidden.shape
+        annual_context = annual_context.unsqueeze(1)  # [B, 1, H_y]
+        query = self.query_layer(daily_hidden)        # [B, 365, H_y]
+
+        # Dot-product attention score: [B, 365, 1]
+        energy = torch.bmm(query, annual_context.transpose(1, 2)) / (H_d ** 0.5)
+        attention_weights = F.softmax(energy, dim=1)  # [B, 365, 1]
+
+        # context = weighted sum of annual_context (broadcasted): [B, 365, H_y]
+        context = attention_weights * annual_context
+
+        return context, attention_weights.squeeze(-1)  # [B, 365, H_y], [B, 365]
+
+
 class DailyDecoder(nn.Module):
-    def __init__(self, daily_input_dim, daily_hidden_dim, annual_context_dim, output_dim=1):
+    def __init__(self, daily_input_dim, daily_hidden_dim, annual_context_dim, output_dim=1, num_heads=2, dropout=0.1):
         super(DailyDecoder, self).__init__()
-        self.lstm = nn.LSTM(daily_input_dim, daily_hidden_dim, batch_first=True)
-        self.attention = CrossAttention(daily_hidden_dim, annual_context_dim)
+        self.lstm = nn.LSTM(daily_input_dim, daily_hidden_dim, num_layers=3, batch_first=True)
         
-        # 最终的预测头，输入是拼接后的LSTM输出和注意力上下文
-        self.fc = nn.Linear(daily_hidden_dim + annual_context_dim, output_dim)
+        # 将年度上下文扩展为序列的注意力机制,可以扩展到更大的维度降低信息损失
+        self.attn_proj = nn.Linear(annual_context_dim, daily_hidden_dim)  # 投射到与 LSTM 输出一致的维度
+        self.multihead_attn = nn.MultiheadAttention(daily_hidden_dim, num_heads, dropout=dropout, batch_first=True)
+        self.norm = nn.LayerNorm(daily_hidden_dim)
+
+        self.fc = nn.Linear(daily_hidden_dim, output_dim)
 
     def forward(self, x_daily, annual_context):
-        # x_daily: (batch_size, L, K_fast)
-        # annual_context: (batch_size, annual_context_dim)
-        
-        # LSTM处理日度序列
-        lstm_out, (h_n, c_n) = self.lstm(x_daily)
-        
-        # 我们使用最后一个时间步的LSTM隐藏状态作为查询
-        last_hidden_state = h_n.squeeze(0) # -> (batch_size, daily_hidden_dim)
-        
-        # 通过注意力机制计算加权的年度上下文
-        attended_context, attention_weights = self.attention(last_hidden_state, annual_context)
-        
-        # 拼接LSTM输出和注意力上下文
-        combined = torch.cat((last_hidden_state, attended_context), dim=1)
-        
-        # 通过全连接层得到最终预测
-        prediction = self.fc(combined)
-        
-        return prediction, attention_weights
+        # x_daily: [B, 365, K_fast]
+        # annual_context: [B, annual_context_dim]
+
+        lstm_out, _ = self.lstm(x_daily)  # [B, 365, H]
+
+        # annual_context: [B, H_y] -> [B, 1, H_y] -> [B, 1, H]
+        annual_context_proj = self.attn_proj(annual_context).unsqueeze(1)  # [B, 1, H]
+
+        # 使用年度上下文作为 key 和 value，LSTM 输出作为 query
+        # 注意 MultiheadAttention 的输入要是 [B, T, H]
+        attn_output, attn_weights = self.multihead_attn(
+            query=lstm_out,
+            key=annual_context_proj.expand(-1, lstm_out.size(1), -1),  # [B, 365, H]
+            value=annual_context_proj.expand(-1, lstm_out.size(1), -1) # [B, 365, H]
+        )  # 输出: [B, 365, H], attn_weights: [B, 365, 365]
+
+        # 残差 + LayerNorm（可选）
+        combined = self.norm(lstm_out + attn_output)  # [B, 365, H]
+
+        prediction = self.fc(combined).squeeze(-1)  # [B, 365]
+
+        return prediction, attn_weights.mean(dim=1)  # 平均注意力权重（[B, 365]）
+
+
+# class DailyDecoder(nn.Module):
+#     def __init__(self, daily_input_dim, daily_hidden_dim, annual_context_dim, output_dim=1):
+#         super(DailyDecoder, self).__init__()
+#         self.lstm = nn.LSTM(daily_input_dim, daily_hidden_dim, batch_first=True)
+#         self.attention = CrossAttention(daily_hidden_dim, annual_context_dim)
+#         self.fc = nn.Linear(daily_hidden_dim + annual_context_dim, output_dim)
+
+#     def forward(self, x_daily, annual_context):
+#         lstm_out, _ = self.lstm(x_daily)  # [B, 365, H_d]
+
+#         # 每天都与 annual_context 做 attention
+#         attended_context, attention_weights = self.attention(lstm_out, annual_context)  # [B, 365, H_y]
+
+#         # 拼接
+#         combined = torch.cat((lstm_out, attended_context), dim=2)  # [B, 365, H_d + H_y]
+
+#         prediction = self.fc(combined).squeeze(-1)  # [B, 365]
+
+#         return prediction, attention_weights
+
 
 # 完整的分层模型
 class Hierarchical(nn.Module):
@@ -206,11 +224,12 @@ class Hierarchical(nn.Module):
         self.decoder = DailyDecoder(daily_input_dim, daily_hidden_dim, annual_hidden_dim, output_dim)
 
     def forward(self, x_daily, x_yearly):
+        # print("input shape: daily:", x_daily.shape, "yearly:", x_yearly.shape)
         # 1. 从年度数据编码长期上下文
         annual_context = self.encoder(x_yearly)
+        # print("annaual context shape:", annual_context.shape)
         
         # 2. 使用长期上下文和日度数据进行解码和预测
         prediction, attention_weights = self.decoder(x_daily, annual_context)
-        print("predication shape", prediction.shape)
         
         return prediction, prediction
