@@ -179,7 +179,7 @@ def old_train(epoches : int, train_dataloader: DataLoader, test_dataloader: Data
             record_param = model.state_dict()
             best_nrmse = nrmse
             best_r2 = r2
-            # torch.save(record_param, f'../model_save/{args.model}/base_model.pth')
+            torch.save(record_param, f'../model_save/{args.model}/base_model.pth')
             logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
 
         else:
@@ -381,9 +381,7 @@ def main():
             # this file is missing, I copy from data/
             std = torch.tensor(np.load('../../data/TEM-MDM/std_vals.npy'))
             test_x = (test_x - mean) / std
-            test_y = test_y + 100
             train_x = (train_x - mean) / std
-            train_y = train_y + 100
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             test_dataset = Dataset(test_x.to(device), test_y.to(device))
             test_dataloader = DataLoader(test_dataset, batch_size=4, shuffle=False)

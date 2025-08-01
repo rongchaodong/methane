@@ -16,7 +16,7 @@ class LSTM_Transformer(nn.Module):
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=config.hidden_size,
-            nhead=1,
+            nhead=4,
             dropout=0.1,
             batch_first=True,
             norm_first=True
