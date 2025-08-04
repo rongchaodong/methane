@@ -21,45 +21,51 @@ if %errorlevel% neq 0 (
 echo 环境激活成功！
 echo.
 
-REM --- 运行第一个 Python 训练脚本 ---
-echo [步骤 2/4] --- 开始训练模型 lstm ---
-python .\base_model.py --model lstm --model_type seq --type temporal
-echo --- 模型 A 训练完成 ---
-echo.
+@REM REM --- 运行第一个 Python 训练脚本 ---
+@REM echo [步骤 2/4] --- 开始训练模型 lstm ---
+@REM python .\base_model.py --simulated --model lstm --type temporal --epoch 200
+@REM echo --- 模型 A 训练完成 ---
+@REM echo.
 
-REM --- 运行第二个 Python 训练脚本 ---
-echo [步骤 3/4] --- 开始训练模型 pyraformer ---
-python .\base_model.py --model pyraformer --model_type seq --type temporal
-echo --- 模型 B 训练完成 ---
-echo.
+@REM REM --- 运行第二个 Python 训练脚本 ---
+@REM echo [步骤 3/4] --- 开始训练模型 pyraformer ---
+@REM python .\base_model.py --simulated --model pyraformer --type temporal
+@REM echo --- 模型 B 训练完成 ---
+@REM echo.
 
-REM --- 运行第二个 Python 训练脚本 ---
-echo [步骤 3/4] --- 开始训练模型 transformer ---
-python .\base_model.py --model transformer --model_type seq --type temporal
-echo --- 模型 B 训练完成 ---
-echo.
+@REM REM --- 运行第二个 Python 训练脚本 ---
+@REM echo [步骤 3/4] --- 开始训练模型 transformer ---
+@REM python .\base_model.py --simulated --model transformer --type temporal
+@REM echo --- 模型 B 训练完成 ---
+@REM echo.
 
-REM --- 运行第二个 Python 训练脚本 ---
-echo [步骤 3/4] --- 开始训练模型 hybrid ---
-python .\base_model.py --model hybrid --model_type seq --type temporal
-echo --- 模型 B 训练完成 ---
-echo.
+@REM REM --- 运行第二个 Python 训练脚本 ---
+@REM echo [步骤 3/4] --- 开始训练模型 hybrid ---
+@REM python .\base_model.py --simulated --model hybrid --type temporal
+@REM echo --- 模型 B 训练完成 ---
+@REM echo.
 
-REM --- 运行第二个 Python 训练脚本 ---
-echo [步骤 3/4] --- 开始训练模型 hierachy ---
-python .\base_model.py --model hierachy --model_type seq --type temporal
-echo --- 模型 B 训练完成 ---
-echo.
-
-REM --- 运行第二个 Python 训练脚本 ---
-echo [步骤 3/4] --- 开始训练模型 hierachy ---
-python .\base_model.py --model hierachy --model_type seq --type temporal --context 2
-echo --- 模型 B 训练完成 ---
-echo.
+@REM REM --- 运行第二个 Python 训练脚本 ---
+@REM echo [步骤 3/4] --- 开始训练模型 hierachy ---
+@REM python .\base_model.py --simulated --model hierachy --model_type seq --type temporal --context 2
+@REM echo --- 模型 B 训练完成 ---
+@REM echo.
 
 REM --- 运行第二个 Python 训练脚本 ---
 echo [步骤 3/4] --- 开始训练模型 hierachy ---
-python .\base_model.py --model hierachy --model_type seq --type temporal --context 8
+python .\base_model.py --simulated --model hierachy --model_type seq --type temporal --context 4 --epoch 50
+echo --- 模型 B 训练完成 ---
+echo.
+
+@REM REM --- 运行第二个 Python 训练脚本 ---
+@REM echo [步骤 3/4] --- 开始训练模型 hierachy ---
+@REM python .\base_model.py --simulated --model hierachy --model_type seq --type temporal --context 6
+@REM echo --- 模型 B 训练完成 ---
+@REM echo.
+
+REM --- 运行第二个 Python 训练脚本 ---
+echo [步骤 3/4] --- 开始训练模型 hierachy ---
+python .\base_model.py --simulated --model hierachy --model_type seq --type temporal --context 8 --epoch 50
 echo --- 模型 B 训练完成 ---
 echo.
 

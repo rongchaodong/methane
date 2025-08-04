@@ -7,9 +7,16 @@ from model import LSTM, Transformer
 from hybrid import LSTM_Transformer
 from hierarchical import Hierarchical, HierarchicalTemporalDataset
 from config import Config
-from base_model import TemporalDataset
+import argparse
 
 config = Config()
+
+parser = argparse.ArgumentParser(description="draw prediction for models")
+parser.add_argument("--simulated", action="store_true", help="training simulated data or observed data")
+parser.add_argument("--model", type=str, help="Model selection")
+parser.add_argument("--data_type", type=str, default="seq", help="Model selection: random, or seq")
+parser.add_argument("--context", type=int, default=4, help="Length of context year as prior knowledge used in hierarchy model")
+args = parser.parse_args()
 
 class Dataset(Dataset):
     def __init__(self, x, y):
@@ -22,6 +29,36 @@ class Dataset(Dataset):
     def __getitem__(self, idx):
         return self.x[idx], self.y[idx]
 
+class TemporalDataset(Dataset):
+    def __init__(self, years):
+        self.years = years
+        self.year_to_idx = {year: i for i, year in enumerate(range(1979, 1979 + config.max_num_years))}
+        if args.data_type == "seq":
+            self.input_files = [f"../../processed_data/TEM-MDM/sequence/temporal/input_{year}.npy" for year in years]
+            self.output_files = [f"../../processed_data/TEM-MDM/sequence/temporal/output_{year}.npy" for year in years]
+        elif args.data_type == "random":
+            self.input_files = [f"../../processed_data/TEM-MDM/temporal/input_{year}.npy" for year in years]
+            self.output_files = [f"../../processed_data/TEM-MDM/temporal/output_{year}.npy" for year in years]
+        self.data_lengths = [np.load(f, mmap_mode='r').shape[0] for f in self.input_files] 
+        self.cumsum_lengths = np.cumsum([0] + self.data_lengths)  
+        self.mean_vals = np.load('../../data/TEM-MDM/mean_vals.npy')
+        self.std_vals = np.load('../../data/TEM-MDM/std_vals.npy')
+
+    def __len__(self):
+        return self.cumsum_lengths[-1]  
+
+    def __getitem__(self, idx):
+        year_idx = np.searchsorted(self.cumsum_lengths, idx, side="right") - 1
+        file_idx = idx - self.cumsum_lengths[year_idx]
+
+        # actual_year = self.years[year_idx]
+        # global_year_idx = self.year_to_idx[actual_year]
+
+        input_data = (np.load(self.input_files[year_idx], mmap_mode='r')[file_idx] - self.mean_vals) / self.std_vals 
+        output_data = np.load(self.output_files[year_idx], mmap_mode='r')[file_idx] / 23
+
+        return torch.tensor(input_data, dtype=torch.float32).to(config.device), torch.tensor(output_data, dtype=torch.float32).to(config.device)
+
 def yearly_draw(model_str: str, simulated: bool, year: int):
     if model_str == "lstm":
         model = LSTM(config).to(config.device)
@@ -29,9 +66,16 @@ def yearly_draw(model_str: str, simulated: bool, year: int):
         model = Transformer(config).to(config.device)
     elif model_str == "hybrid":
         model = LSTM_Transformer(config).to(config.device)
+    elif model_str == "hierarchy":
+        model = Hierarchical(10, 8, 5, 8, 1).to(config.device)
 
     try:
-        path = f'../model_save/{model_str}/base_model.pth'
+        if model_str == "hierarchy":
+            path = f'../model_save/{model_str}/base_{model_str}-{year}.pth'
+        elif args.simulated:
+            path = f'../model_save/{model_str}/base.pth'
+        else:
+            path = f'../model_save/{model_str}/base_obs.pth'
         model.load_state_dict(torch.load(path))
     except FileNotFoundError:
         print(path)
@@ -40,8 +84,13 @@ def yearly_draw(model_str: str, simulated: bool, year: int):
 
     if simulated:
         test_years = range(1999, 2019)
-        test_dataset = TemporalDataset(test_years)
-        test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
+        if model_str == "hierarchy":
+            all_years = range(1979, 2019)
+            test_dataset = HierarchicalTemporalDataset(test_years, config, all_years)
+            test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
+        else:
+            test_dataset = TemporalDataset(test_years)
+            test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
     else:
         test_x = torch.tensor(np.load('../../processed_data/FLUXNET-CH4/temporal/test_data_x.npy'), dtype=torch.float32)
         test_y = torch.tensor(np.load('../../processed_data/FLUXNET-CH4/temporal/test_data_y.npy'), dtype=torch.float32)
@@ -57,10 +106,17 @@ def yearly_draw(model_str: str, simulated: bool, year: int):
     all_targets = []
     with torch.no_grad():
         if simulated:
-            for batch_X, batch_y, _ in test_dataloader:
-                _, prediction = model(batch_X)
-                print("shape", prediction.shape, batch_y.shape)
-                break
+            if model_str == "hierarchy":
+                for batch_X_daily, batch_x_yearly, batch_y in test_dataloader:
+                    if torch.isnan(batch_X_daily).any():
+                        continue
+                    _, prediction = model(batch_X_daily, batch_x_yearly)
+                    break
+            else:
+                for batch_X, batch_y in test_dataloader:
+                    _, prediction = model(batch_X)
+                    print("shape", prediction.shape, batch_y.shape)
+                    break
         else:
             for batch_X, batch_y in test_dataloader:
                 _, prediction = model(batch_X)
@@ -76,19 +132,20 @@ def yearly_draw(model_str: str, simulated: bool, year: int):
 
 
         plt.figure(figsize=(12, 4))
-        plt.plot(batch_y[1].cpu().numpy(), label='Ground Truth')
-        plt.plot(prediction[1].detach().cpu().numpy(), label='Prediction')
+        plt.plot(batch_y[3].cpu().numpy(), label='Ground Truth')
+        plt.plot(prediction[3].detach().cpu().numpy(), label='Prediction')
         plt.xlabel('Day of Year')
         plt.ylabel('Value')
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
         if simulated:
-            plt.savefig(f'prediction_TEM_{model_str}_2%.png')
+            if model_str == "hierarchy":
+                plt.savefig(f'prediction_TEM_{model_str}-{year}.png')
+            else:
+                plt.savefig(f'prediction_TEM_{model_str}.png')
         else:
-            plt.savefig(f'prediction_OBS_{model_str}_2%.png')
+            plt.savefig(f'prediction_OBS_{model_str}.png')
 
 
-# yearly_draw("lstm", False, 1979)
-# yearly_draw("transformer", False, 1979)
-# yearly_draw("hybrid", False, 1979)
+yearly_draw(args.model, args.simulated, args.context)

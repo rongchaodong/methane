@@ -6,13 +6,27 @@ from torch.utils.data import DataLoader, Dataset
 import math
 import logging
 from sklearn.metrics import mean_squared_error, r2_score
-
 from config import Config
 from model import LSTM, MyEALSTM, MultiTCN, Transformer, iTransformer, Pyraformer
-
 from hybrid import LSTM_Transformer, Contextual_LSTM_Transformer
-
 from hierarchical import HierarchicalTemporalDataset, Hierarchical
+
+
+config = Config()
+criterion = nn.MSELoss()
+
+parser = argparse.ArgumentParser(description="training base model for methane dataset")
+parser.add_argument("--type", type=str, default="temporal", help="please choose temporal or spatial")
+parser.add_argument("--simulated", action="store_true", help="training simulated data or observed data")
+parser.add_argument("--model", type=str, help="Model selection")
+parser.add_argument("--data_type", type=str, default="seq", help="Model selection: random, or seq")
+parser.add_argument("--epoch", type=int, default=100, help="Training epoches")
+parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
+parser.add_argument("--context", type=int, default=4, help="Length of context year as prior knowledge used in hierarchy model")
+args = parser.parse_args()
+
+config.num_context_years = args.context
+
 
 class Dataset(Dataset):
     def __init__(self, x, y):
@@ -29,8 +43,12 @@ class TemporalDataset(Dataset):
     def __init__(self, years):
         self.years = years
         self.year_to_idx = {year: i for i, year in enumerate(range(1979, 1979 + config.max_num_years))}
-        self.input_files = [f"../../processed_data/TEM-MDM/sequence/temporal/input_{year}.npy" for year in years]
-        self.output_files = [f"../../processed_data/TEM-MDM/sequence/temporal/output_{year}.npy" for year in years]
+        if args.data_type == "seq":
+            self.input_files = [f"../../processed_data/TEM-MDM/sequence/temporal/input_{year}.npy" for year in years]
+            self.output_files = [f"../../processed_data/TEM-MDM/sequence/temporal/output_{year}.npy" for year in years]
+        elif args.data_type == "random":
+            self.input_files = [f"../../processed_data/TEM-MDM/temporal/input_{year}.npy" for year in years]
+            self.output_files = [f"../../processed_data/TEM-MDM/temporal/output_{year}.npy" for year in years]
         self.data_lengths = [np.load(f, mmap_mode='r').shape[0] for f in self.input_files] 
         self.cumsum_lengths = np.cumsum([0] + self.data_lengths)  
         self.mean_vals = np.load('../../data/TEM-MDM/mean_vals.npy')
@@ -43,23 +61,25 @@ class TemporalDataset(Dataset):
         year_idx = np.searchsorted(self.cumsum_lengths, idx, side="right") - 1
         file_idx = idx - self.cumsum_lengths[year_idx]
 
-        # 获取真实的年份
-        actual_year = self.years[year_idx]
-        # 从年份到全局索引的转换
-        global_year_idx = self.year_to_idx[actual_year]
+        # actual_year = self.years[year_idx]
+        # global_year_idx = self.year_to_idx[actual_year]
 
         input_data = (np.load(self.input_files[year_idx], mmap_mode='r')[file_idx] - self.mean_vals) / self.std_vals 
         output_data = np.load(self.output_files[year_idx], mmap_mode='r')[file_idx] / 23
 
-        return torch.tensor(input_data, dtype=torch.float32).to(config.device), torch.tensor(output_data, dtype=torch.float32).to(config.device), torch.tensor(global_year_idx, dtype=torch.long).to(config.device)
+        return torch.tensor(input_data, dtype=torch.float32).to(config.device), torch.tensor(output_data, dtype=torch.float32).to(config.device)
 
 class SpatialDataset(Dataset):
     def __init__(self, years, folds):
         self.years = years
         self.folds = folds 
         self.device = config.device
-        self.input_files = [f"../../processed_data/TEM-MDM/spatial/input_{year}_{fold}.npy" for year in years for fold in folds]
-        self.output_files = [f"../../processed_data/TEM-MDM/spatial/output_{year}_{fold}.npy" for year in years for fold in folds]
+        if args.data_type == "seq":
+            self.input_files = [f"../../processed_data/TEM-MDM/spatial/input_{year}_{fold}.npy" for year in years for fold in folds]
+            self.output_files = [f"../../processed_data/TEM-MDM/spatial/output_{year}_{fold}.npy" for year in years for fold in folds]
+        elif args.data_type == "random":
+            self.input_files = [f"../../processed_data/TEM-MDM/spatial/input_{year}_{fold}.npy" for year in years for fold in folds]
+            self.output_files = [f"../../processed_data/TEM-MDM/spatial/output_{year}_{fold}.npy" for year in years for fold in folds]
         self.data_lengths = [np.load(f, mmap_mode='r').shape[0] for f in self.input_files]
         self.cumsum_lengths = np.cumsum([0] + self.data_lengths)
 
@@ -78,21 +98,6 @@ class SpatialDataset(Dataset):
 
         return torch.tensor(input_data, dtype=torch.float32).to(self.device), torch.tensor(output_data, dtype=torch.float32).to(self.device)
 
-parser = argparse.ArgumentParser(description="training base model for methane dataset")
-parser.add_argument("--type", type=str, default="temporal", help="please choose temporal or spatial")
-parser.add_argument("--simulated", action="store_true", help="training simulated data or observed data")
-parser.add_argument("--model", type=str, help="Model selection")
-parser.add_argument("--model_type", type=str, default="seq", help="Model selection")
-parser.add_argument("--epoch", type=int, default=100, help="Training epoches")
-parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
-parser.add_argument("--trans", type=bool, default=False, help="training hybrid with trans or not")
-parser.add_argument("--context", type=int, default=4, help="Training epoches")
-args = parser.parse_args()
-
-config = Config()
-criterion = nn.MSELoss()
-
-config.num_context_years = args.context
 logging.basicConfig(
     filename=f"log/{args.model_type}_{args.type}_{args.model}.log" if args.simulated else f"log/base_obs_{args.type}_{args.model}.log", 
     filemode="a",
@@ -118,84 +123,20 @@ elif args.model == 'pyraformer':
 elif args.model == 'hybrid':
     model = LSTM_Transformer(config).to(config.device)
     # model = Contextual_LSTM_Transformer(config).to(config.device)
-elif args.model == 'hierachy':
+elif args.model == 'hierarchy':
     model = Hierarchical(10, 8, 5, 8, 1).to(config.device)
+
+if args.model == 'hierarchy' and args.data_type == "random" and not args.simulated:
+    print("cannot train hierarchy model in random dataset!")
+    exit(-1)
+
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-def old_train(epoches : int, train_dataloader: DataLoader, test_dataloader: DataLoader):
-    #hyperparameter
-    patience = 5
-    min_delta = 1e-4
-    wait = 0
-    r2_max = -10.0
-
-    for epoch in range(epoches):
-        logger.info(f'Epoch {epoch}: Training start.')
-        running_loss = 0.0
-        model.train()
-        for batch_X, batch_y, _ in train_dataloader:
-            if torch.isnan(batch_X).any():
-                continue
-            _, prediction = model(batch_X)
-            # print("prediction shape:", prediction.shape)
-            # print("batch_y shape:", batch_y.shape)
-
-            loss = criterion(prediction, batch_y)  # 保证 shape: [B, 1]
-
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-
-            running_loss += loss.item()
-
-        avg_loss = math.sqrt(running_loss / len(train_dataloader))
-        logger.info(f'Epoch {epoch}: Training loss {avg_loss*23:.4f}')
-
-        model.eval()
-        logger.info(f'Epoch {epoch}: eval start.')
-        all_predictions = []
-        all_targets = []
-        with torch.no_grad():
-            for batch_X, batch_y, _ in test_dataloader:
-                _, prediction = model(batch_X)
-                all_predictions.append(prediction.cpu().numpy().reshape(-1))
-                all_targets.append(batch_y.cpu().numpy().reshape(-1))
-
-        all_predictions = np.concatenate(all_predictions, axis=0)
-        all_targets = np.concatenate(all_targets, axis=0)
-        mask = ~np.isnan(all_targets)
-
-        rmse = np.sqrt(mean_squared_error(all_targets[mask], all_predictions[mask]))
-        nrmse = rmse / np.mean(all_targets[mask])
-        r2 = r2_score(all_targets[mask], all_predictions[mask])
-
-        logger.info(f'testing rmse {rmse:.4f}, nrmse {nrmse:.4f}, r2 score {r2:.4f}')
-
-        # early stopping check
-        if r2 > r2_max + min_delta:
-            r2_max = r2
-            wait = 0
-            record_param = model.state_dict()
-            best_nrmse = nrmse
-            best_r2 = r2
-            torch.save(record_param, f'../model_save/{args.model}/base_model.pth')
-            logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
-
-        else:
-            wait += 1
-            logger.info(f"No improvement in R2 for {wait} epoch(s)")
-
-        if wait >= patience:
-            logger.info(f"Early stopping triggered at epoch {epoch}")
-            break
-    
-    return best_nrmse, best_r2
 
 def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: DataLoader):
     #hyperparameter
-    patience = 100
-    min_delta = 1e-5
+    patience = 10
+    min_delta = 1e-4
     wait = 0
     r2_max = -10.0
 
@@ -210,7 +151,7 @@ def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: Data
             # print("prediction shape:", prediction.shape)
             # print("batch_y shape:", batch_y.shape)
 
-            loss = criterion(prediction, batch_y)  # 保证 shape: [B, 1]
+            loss = criterion(prediction, batch_y)
 
             optimizer.zero_grad()
             loss.backward()
@@ -249,7 +190,10 @@ def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: Data
             record_param = model.state_dict()
             best_nrmse = nrmse
             best_r2 = r2
-            torch.save(record_param, f'../model_save/{args.model}/base_model.pth')
+            if args.simulated:
+                torch.save(record_param, f'../model_save/{args.model}/base.pth')
+            else:
+                torch.save(record_param, f'../model_save/{args.model}/base_obs.pth')
             logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
             # import time
             # time.sleep(1)
@@ -264,9 +208,9 @@ def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: Data
     
     return best_nrmse, best_r2
 
-def train(epoches : int, train_dataloader: DataLoader, test_dataloader: DataLoader):
+def hierarchy_train(epoches : int, train_dataloader: DataLoader, test_dataloader: DataLoader):
     #hyperparameter
-    patience = 5
+    patience = 10
     min_delta = 1e-4
     wait = 0
     r2_max = -10.0
@@ -321,7 +265,10 @@ def train(epoches : int, train_dataloader: DataLoader, test_dataloader: DataLoad
             record_param = model.state_dict()
             best_nrmse = nrmse
             best_r2 = r2
-            torch.save(record_param, f'../model_save/{args.model}/base_model.pth')
+            if args.simulated:
+                torch.save(record_param, f'../model_save/{args.model}/base-{args.context}.pth')
+            else:
+                torch.save(record_param, f'../model_save/{args.model}/base_obs-{args.context}.pth')
             logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
 
         else:
@@ -338,7 +285,8 @@ def train(epoches : int, train_dataloader: DataLoader, test_dataloader: DataLoad
 def main():
     if args.simulated:
         if args.type == "temporal":
-            if args.model == 'hierachy':
+            if args.model == 'hierarchy':
+                    logger.info(f'training hierarchy with context = {args.context}')
                     all_years = range(1979, 2019)
                     warm_up = 1979 + config.num_context_years
                     train_years = range(warm_up, 1999)
@@ -347,17 +295,15 @@ def main():
                     train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
                     test_dataset = HierarchicalTemporalDataset(test_years, config, all_years)
                     test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
-                    train(args.epoch, train_dataloader, test_dataloader) 
-            else: # hybrid
-                train_years = range(1984, 1999)
+                    hierarchy_train(args.epoch, train_dataloader, test_dataloader) 
+            else: # other models, same dataset handler
+                train_years = range(1979, 1999)
                 train_dataset = TemporalDataset(train_years)
                 train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
                 test_years = range(1999, 2019)
                 test_dataset = TemporalDataset(test_years)
                 test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
-                old_train(args.epoch, train_dataloader, test_dataloader)  
-            # model train
-            # train(args.epoch, train_dataloader, test_dataloader)         
+                obs_train(args.epoch, train_dataloader, test_dataloader)         
         else: # simulated spatial dataset
             years = range(1979, 2019)
             nrmse_list = []
@@ -369,18 +315,17 @@ def main():
                 test_dataset = SpatialDataset(years, test_folds)
                 train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
                 test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
-                nrmse, r2 = train(args.epoch, train_dataloader, test_dataloader)
+                nrmse, r2 = obs_train(args.epoch, train_dataloader, test_dataloader)
                 nrmse_list.append(nrmse)
                 r2_list.append(r2)
             logger.info(f'testing average nrmse {sum(nrmse_list)/len(nrmse_list):.4f}, r2 score {sum(r2_list)/len(r2_list):.4f}')
-    else: # flux
+    else: # fluxnet
         if args.type == "temporal":
             test_x = torch.tensor(np.load('../../processed_data/FLUXNET-CH4/temporal/test_data_x.npy'), dtype=torch.float32)
             test_y = torch.tensor(np.load('../../processed_data/FLUXNET-CH4/temporal/test_data_y.npy'), dtype=torch.float32)
             train_x = torch.tensor(np.load('../../processed_data/FLUXNET-CH4/temporal/train_data_x.npy'), dtype=torch.float32)
             train_y = torch.tensor(np.load('../../processed_data/FLUXNET-CH4/temporal/train_data_y.npy'), dtype=torch.float32)
             mean = torch.tensor(np.load('../../data/TEM-MDM/mean_vals.npy'))
-            # this file is missing, I copy from data/
             std = torch.tensor(np.load('../../data/TEM-MDM/std_vals.npy'))
             test_x = (test_x - mean) / std
             train_x = (train_x - mean) / std
@@ -409,7 +354,7 @@ def main():
                 test_dataloader = DataLoader(test_dataset, batch_size=4, shuffle=False)
                 train_dataset = Dataset(train_x.to(device), train_y.to(device))
                 train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=False)
-                nrmse, r2 = train(args.epoch, train_dataloader, test_dataloader)
+                nrmse, r2 = obs_train(args.epoch, train_dataloader, test_dataloader)
                 nrmse_list.append(nrmse)
                 r2_list.append(r2)
             logger.info(f'testing average nrmse {sum(nrmse_list)/len(nrmse_list):.4f}, r2 score {sum(r2_list)/len(r2_list):.4f}')
