@@ -1,73 +1,45 @@
-@echo off
-REM --- 设置脚本环境 ---
-echo.
-echo ===================================================
-echo     自动化训练脚本已启动
-echo ===================================================
-echo.
-
-REM --- 激活 Conda 环境 ---
-REM 使用 'call' 来确保激活命令执行后，脚本能继续向下运行
-echo [步骤 1/4] 正在激活 Conda 环境 'methane'...
+echo activating conda 'methane'...
 call conda activate methane
 
-REM --- 检查环境是否激活成功 ---
 if %errorlevel% neq 0 (
     echo.
-    echo 错误：激活 Conda 环境 'methane' 失败！
-    echo 请确认您已经正确安装了 Conda 并且环境名称无误。
+    echo activating conda methane failed!
     goto :eof
 )
-echo 环境激活成功！
+echo activating done.
 echo.
 
-@REM REM --- 运行第一个 Python 训练脚本 ---
-@REM echo [步骤 2/4] --- 开始训练模型 lstm ---
+@REM echo training lstm ---
 @REM python .\base_model.py --simulated --model lstm --type temporal --epoch 200
-@REM echo --- 模型 A 训练完成 ---
 @REM echo.
 
-@REM REM --- 运行第二个 Python 训练脚本 ---
-@REM echo [步骤 3/4] --- 开始训练模型 pyraformer ---
+@REM echo training pyraformer ---
 @REM python .\base_model.py --simulated --model pyraformer --type temporal
-@REM echo --- 模型 B 训练完成 ---
 @REM echo.
 
-@REM REM --- 运行第二个 Python 训练脚本 ---
-@REM echo [步骤 3/4] --- 开始训练模型 transformer ---
+@REM echo training transformer ---
 @REM python .\base_model.py --simulated --model transformer --type temporal
-@REM echo --- 模型 B 训练完成 ---
 @REM echo.
 
-@REM REM --- 运行第二个 Python 训练脚本 ---
-@REM echo [步骤 3/4] --- 开始训练模型 hybrid ---
+@REM echo training hybrid ---
 @REM python .\base_model.py --simulated --model hybrid --type temporal
-@REM echo --- 模型 B 训练完成 ---
 @REM echo.
 
-@REM REM --- 运行第二个 Python 训练脚本 ---
-@REM echo [步骤 3/4] --- 开始训练模型 hierachy ---
+@REM echo training hierachy ---
 @REM python .\base_model.py --simulated --model hierachy --model_type seq --type temporal --context 2
-@REM echo --- 模型 B 训练完成 ---
 @REM echo.
 
-REM --- 运行第二个 Python 训练脚本 ---
-echo [步骤 3/4] --- 开始训练模型 hierachy ---
+echo training hierachy ---
 python .\base_model.py --simulated --model hierachy --model_type seq --type temporal --context 4 --epoch 50
-echo --- 模型 B 训练完成 ---
 echo.
 
-@REM REM --- 运行第二个 Python 训练脚本 ---
-@REM echo [步骤 3/4] --- 开始训练模型 hierachy ---
+@REM echo training hierachy ---
 @REM python .\base_model.py --simulated --model hierachy --model_type seq --type temporal --context 6
-@REM echo --- 模型 B 训练完成 ---
 @REM echo.
 
-REM --- 运行第二个 Python 训练脚本 ---
-echo [步骤 3/4] --- 开始训练模型 hierachy ---
+
+echo training hierachy ---
 python .\base_model.py --simulated --model hierachy --model_type seq --type temporal --context 8 --epoch 50
-echo --- 模型 B 训练完成 ---
 echo.
 
-REM --- 停用 Conda 环境 (好习惯) ---
 call conda deactivate
