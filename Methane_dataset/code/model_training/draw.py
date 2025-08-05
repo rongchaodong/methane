@@ -16,6 +16,7 @@ parser.add_argument("--simulated", action="store_true", help="training simulated
 parser.add_argument("--model", type=str, help="Model selection")
 parser.add_argument("--data_type", type=str, default="seq", help="Model selection: random, or seq")
 parser.add_argument("--context", type=int, default=4, help="Length of context year as prior knowledge used in hierarchy model")
+parser.add_argument("--index", type=int, help="print which site")
 args = parser.parse_args()
 
 class Dataset(Dataset):
@@ -59,7 +60,7 @@ class TemporalDataset(Dataset):
 
         return torch.tensor(input_data, dtype=torch.float32).to(config.device), torch.tensor(output_data, dtype=torch.float32).to(config.device)
 
-def yearly_draw(model_str: str, simulated: bool, year: int):
+def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
     if model_str == "lstm":
         model = LSTM(config).to(config.device)
     elif model_str == "transformer":
@@ -76,7 +77,7 @@ def yearly_draw(model_str: str, simulated: bool, year: int):
             path = f'../model_save/{model_str}/base.pth'
         else:
             path = f'../model_save/{model_str}/base_obs.pth'
-        model.load_state_dict(torch.load(path))
+        model.load_state_dict(torch.load(path, weights_only=True))
     except FileNotFoundError:
         print(path)
         print("cannot find {path} the model!")
@@ -99,7 +100,7 @@ def yearly_draw(model_str: str, simulated: bool, year: int):
         test_x = (test_x - mean) / std
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         test_dataset = Dataset(test_x.to(device), test_y.to(device))
-        test_dataloader = DataLoader(test_dataset, batch_size=4, shuffle=False)
+        test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     model.eval()
     all_predictions = []
@@ -120,20 +121,13 @@ def yearly_draw(model_str: str, simulated: bool, year: int):
         else:
             for batch_X, batch_y in test_dataloader:
                 _, prediction = model(batch_X)
-                print("shape", prediction.shape, batch_y.shape)
-                break
-            # exit()
-            # all_predictions.append(prediction.cpu().numpy().reshape(-1))
-            # all_targets.append(batch_y.cpu().numpy().reshape(-1))
-
-        # all_predictions = np.concatenate(all_predictions, axis=0)
-        # all_targets = np.concatenate(all_targets, axis=0)
-        # mask = ~np.isnan(all_targets)
+                all_predictions.append(prediction.cpu().numpy().reshape(-1))
+                all_targets.append(batch_y.cpu().numpy().reshape(-1))
 
 
         plt.figure(figsize=(12, 4))
-        plt.plot(batch_y[3].cpu().numpy(), label='Ground Truth')
-        plt.plot(prediction[3].detach().cpu().numpy(), label='Prediction')
+        plt.plot(all_targets[index], label='Ground Truth')
+        plt.plot(all_predictions[index], label='Prediction')
         plt.xlabel('Day of Year')
         plt.ylabel('Value')
         plt.legend()
@@ -141,11 +135,11 @@ def yearly_draw(model_str: str, simulated: bool, year: int):
         plt.tight_layout()
         if simulated:
             if model_str == "hierarchy":
-                plt.savefig(f'prediction_TEM_{model_str}-{year}.png')
+                plt.savefig(f'figure/prediction_TEM_{model_str}-{year}.png')
             else:
-                plt.savefig(f'prediction_TEM_{model_str}.png')
+                plt.savefig(f'figure/prediction_TEM_{model_str}.png')
         else:
-            plt.savefig(f'prediction_OBS_{model_str}.png')
+            plt.savefig(f'figure/prediction_OBS_{model_str}-{args.index}.png')
 
 
-yearly_draw(args.model, args.simulated, args.context)
+yearly_draw(args.model, args.simulated, args.context, args.index)
