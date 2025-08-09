@@ -92,6 +92,108 @@ class HierarchicalTemporalDataset(Dataset):
             torch.tensor(y_target, dtype=torch.float32).to(config.device)
         )
 
+class HierarchicalSpatialDataset(Dataset):
+    """
+    1. x_daily: fast features in data: (B, T=365, K_fast=5), has 5 features
+    2. x_yearly: slow features: (B, num_context_years, K_slow=10), 10 features
+    3. y_target: the y_batch shaped in (B, T=365)
+    """
+    def __init__(self, target_years, config, all_available_years_range, folds):
+        self.target_years = list(target_years)
+        self.config = config
+        self.all_available_years = list(all_available_years_range)
+        self.folds = folds
+        
+        self.K_slow = 10 
+        self.K_fast = 5 
+        """
+        input/output_files structure:
+        input_1979_0, input_1979_1, input_1979_2...
+        """
+        self.input_files = {f"{year}_{fold}": f"../../processed_data/TEM-MDM/sequence/spatial/input_{year}_{fold}.npy" for year in self.all_available_years for fold in folds}
+        self.output_files = {f"{year}_{fold}": f"../../processed_data/TEM-MDM/sequence/spatial/output_{year}_{fold}.npy" for year in target_years for fold in folds}
+        self.mean_vals = np.load('../../data/TEM-MDM/mean_vals.npy')
+        self.std_vals = np.load('../../data/TEM-MDM/std_vals.npy')
+
+        self.yearly_caches = {}
+        for f in folds:
+            yearly_features_cache = self._precompute_yearly_features(f)
+            self.yearly_caches[f] = yearly_features_cache
+
+        self.data_lengths = [np.load(self.input_files[key], mmap_mode='r').shape[0] for key in self.input_files.keys()]
+        self.cumsum_lengths = np.cumsum([0] + self.data_lengths)
+
+    def _precompute_yearly_features(self, fold: int):
+        cache = {}
+        mean_slow = self.mean_vals[:self.K_slow]
+        std_slow = self.std_vals[:self.K_slow]
+
+        for year in self.all_available_years:
+            key = f"{year}_{fold}"
+            # print(key)
+            full_year_data = np.load(self.input_files[key], mmap_mode='r')
+            slow_features_for_year = full_year_data[:, 0, :self.K_slow]
+            slow_features_for_year = torch.tensor(slow_features_for_year, dtype=torch.float32)
+            
+            normalized_slow_features = (slow_features_for_year - mean_slow) / std_slow
+            # print(normalized_slow_features)
+            cache[key] = normalized_slow_features.detach()
+        return cache
+
+    def __len__(self):
+        return self.cumsum_lengths[-1]
+
+    def __getitem__(self, idx):
+        folded_idx = np.searchsorted(self.cumsum_lengths, idx, side="right") - 1
+        file_idx = idx - self.cumsum_lengths[folded_idx]
+        # print(self.folds)
+        year = folded_idx // len(self.folds)
+        fold = self.folds[folded_idx % len(self.folds)]
+        # print("folded_idx", folded_idx, "year", year, "fold", fold, " data length: ", self.data_lengths[folded_idx])
+        actual_year = self.target_years[year]
+        # print("file idx:", file_idx, " actual year", actual_year)
+
+        key = f"{actual_year}_{fold}"
+        full_input_sample = np.load(self.input_files[key], mmap_mode='r')[file_idx]
+        # print("this year data:", full_input_sample[0])
+        
+        normalized_input = (full_input_sample - self.mean_vals) / self.std_vals
+        # print("this year data:", actual_year, " ", normalized_input[0][:10])
+        
+        x_daily = normalized_input[:, self.K_slow:]
+        
+        y_target = np.load(self.output_files[key], mmap_mode='r')[file_idx] / 23
+
+        context_vectors = []
+        for i in range(1, self.config.num_context_years + 1):
+            context_year = actual_year - i
+            # print(self.mean_vals.shape)
+            # print(self.std_vals.shape)
+            # print("context year", context_year, " context year length", self.data_lengths[folded_idx - i])
+            # print("context year true data:", np.load(self.input_files[context_year], mmap_mode='r')[file_idx][0][:10])
+            
+            key = f"{context_year}_{fold}"
+            if key in self.yearly_caches[fold]:
+                vec = self.yearly_caches[fold][key][file_idx]
+            else:
+                earliest_year = self.all_available_years[0]
+                key = f"{earliest_year}_{fold}"
+                vec = self.yearly_caches[fold][key][file_idx]
+            # print("context vec of :", context_year, " ", vec)
+            context_vectors.append(vec)
+        
+        x_yearly = torch.stack(context_vectors)
+        # print("target", y_target.shape)
+        # print("x_daily", x_daily.shape)
+        # print("year_daily", x_yearly.shape)
+        # exit()
+
+        return (
+            torch.tensor(x_daily, dtype=torch.float32).to(config.device),
+            x_yearly.to(config.device),
+            torch.tensor(y_target, dtype=torch.float32).to(config.device)
+        )
+
 # class AnnualEncoder(nn.Module):
 #     def __init__(self, input_dim, hidden_dim, num_layers=1):
 #         super(AnnualEncoder, self).__init__()

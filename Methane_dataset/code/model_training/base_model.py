@@ -9,7 +9,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 from config import Config
 from model import LSTM, MyEALSTM, MultiTCN, Transformer, iTransformer, Pyraformer
 from hybrid import LSTM_Transformer, Contextual_LSTM_Transformer
-from hierarchical import HierarchicalTemporalDataset, Hierarchical
+from hierarchical import HierarchicalTemporalDataset, Hierarchical, HierarchicalSpatialDataset
 
 
 config = Config()
@@ -40,12 +40,16 @@ class Dataset(Dataset):
         return self.x[idx], self.y[idx]
 
 class TemporalDataset(Dataset):
-    def __init__(self, years):
+    def __init__(self, years, data_source: str):
         self.years = years
         self.year_to_idx = {year: i for i, year in enumerate(range(1979, 1979 + config.max_num_years))}
         if args.data_type == "seq":
-            self.input_files = [f"../../processed_data/TEM-MDM/sequence/temporal/input_{year}.npy" for year in years]
-            self.output_files = [f"../../processed_data/TEM-MDM/sequence/temporal/output_{year}.npy" for year in years]
+            if data_source == "full":
+                self.input_files = [f"../../processed_data/TEM-MDM/full/temporal/input_{year}.npy" for year in years]
+                self.output_files = [f"../../processed_data/TEM-MDM/full/temporal/output_{year}.npy" for year in years]
+            elif data_source == "seq":
+                self.input_files = [f"../../processed_data/TEM-MDM/sequence/temporal/input_{year}.npy" for year in years]
+                self.output_files = [f"../../processed_data/TEM-MDM/sequence/temporal/output_{year}.npy" for year in years]
         elif args.data_type == "random":
             self.input_files = [f"../../processed_data/TEM-MDM/temporal/input_{year}.npy" for year in years]
             self.output_files = [f"../../processed_data/TEM-MDM/temporal/output_{year}.npy" for year in years]
@@ -75,8 +79,8 @@ class SpatialDataset(Dataset):
         self.folds = folds 
         self.device = config.device
         if args.data_type == "seq":
-            self.input_files = [f"../../processed_data/TEM-MDM/spatial/input_{year}_{fold}.npy" for year in years for fold in folds]
-            self.output_files = [f"../../processed_data/TEM-MDM/spatial/output_{year}_{fold}.npy" for year in years for fold in folds]
+            self.input_files = [f"../../processed_data/TEM-MDM/sequence/spatial/input_{year}_{fold}.npy" for year in years for fold in folds]
+            self.output_files = [f"../../processed_data/TEM-MDM/sequence/spatial/output_{year}_{fold}.npy" for year in years for fold in folds]
         elif args.data_type == "random":
             self.input_files = [f"../../processed_data/TEM-MDM/spatial/input_{year}_{fold}.npy" for year in years for fold in folds]
             self.output_files = [f"../../processed_data/TEM-MDM/spatial/output_{year}_{fold}.npy" for year in years for fold in folds]
@@ -99,7 +103,7 @@ class SpatialDataset(Dataset):
         return torch.tensor(input_data, dtype=torch.float32).to(self.device), torch.tensor(output_data, dtype=torch.float32).to(self.device)
 
 logging.basicConfig(
-    filename=f"log/{args.model_type}_{args.type}_{args.model}.log" if args.simulated else f"log/base_obs_{args.type}_{args.model}.log", 
+    filename=f"log/{args.data_type}_{args.type}_{args.model}.log" if args.simulated else f"log/base_obs_{args.type}_{args.model}.log", 
     filemode="a",
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO 
@@ -135,8 +139,12 @@ optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
 def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: DataLoader):
     #hyperparameter
-    patience = 10
-    min_delta = 1e-4
+    if args.simulated:
+        patience = 10
+        min_delta = 1e-4
+    else:
+        patience = 100
+        min_delta = 1e-5
     wait = 0
     r2_max = -10.0
 
@@ -193,7 +201,10 @@ def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: Data
             if args.simulated:
                 torch.save(record_param, f'../model_save/{args.model}/base.pth')
             else:
-                torch.save(record_param, f'../model_save/{args.model}/base_obs.pth')
+                pass
+                # import time
+                # time.sleep(2)
+                # torch.save(record_param, f'../model_save/{args.model}/base_obs.pth')
             logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
             # import time
             # time.sleep(1)
@@ -298,27 +309,44 @@ def main():
                     hierarchy_train(args.epoch, train_dataloader, test_dataloader) 
             else: # other models, same dataset handler
                 train_years = range(1979, 1999)
-                train_dataset = TemporalDataset(train_years)
+                train_dataset = TemporalDataset(train_years, "seq")
                 train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
                 test_years = range(1999, 2019)
-                test_dataset = TemporalDataset(test_years)
+                test_dataset = TemporalDataset(test_years, "full")
                 test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
                 obs_train(args.epoch, train_dataloader, test_dataloader)         
         else: # simulated spatial dataset
             years = range(1979, 2019)
-            nrmse_list = []
-            r2_list = []
-            for test in range(5): 
-                train_folds = [i for i in range(5) if i not in [test]]
-                test_folds = [test]
+            train_folds = [1, 2, 3, 4]
+            test_folds = [0]
+            if args.model == 'hierarchy':
+                logger.info(f'training hierarchy with context = {args.context}')
+                warm_up = 1979 + config.num_context_years
+                train_years = range(warm_up, 1999)
+                train_dataset = HierarchicalSpatialDataset(years, config, years, train_folds)
+                test_dataset = HierarchicalSpatialDataset(years, config, years, test_folds)
+                train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+                test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
+                hierarchy_train(args.epoch, train_dataloader, test_dataloader) 
+            else:
                 train_dataset = SpatialDataset(years, train_folds)
                 test_dataset = SpatialDataset(years, test_folds)
                 train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
                 test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
-                nrmse, r2 = obs_train(args.epoch, train_dataloader, test_dataloader)
-                nrmse_list.append(nrmse)
-                r2_list.append(r2)
-            logger.info(f'testing average nrmse {sum(nrmse_list)/len(nrmse_list):.4f}, r2 score {sum(r2_list)/len(r2_list):.4f}')
+                obs_train(args.epoch, train_dataloader, test_dataloader)
+            # nrmse_list = []
+            # r2_list = []
+            # for test in range(5): 
+            #     train_folds = [i for i in range(5) if i not in [test]]
+            #     test_folds = [test]
+            #     train_dataset = SpatialDataset(years, train_folds)
+            #     test_dataset = SpatialDataset(years, test_folds)
+            #     train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+            #     test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
+            #     nrmse, r2 = obs_train(args.epoch, train_dataloader, test_dataloader)
+            #     nrmse_list.append(nrmse)
+            #     r2_list.append(r2)
+            # logger.info(f'testing average nrmse {sum(nrmse_list)/len(nrmse_list):.4f}, r2 score {sum(r2_list)/len(r2_list):.4f}')
     else: # fluxnet
         if args.type == "temporal":
             test_x = torch.tensor(np.load('../../processed_data/FLUXNET-CH4/temporal/test_data_x.npy'), dtype=torch.float32)
