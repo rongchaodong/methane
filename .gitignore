@@ -5,3 +5,4 @@ Methane_dataset/code/model_training/Time-Series-Library-main/
 Methane_dataset/code/model_training/log/
 *.pyc
 Methane_dataset/code/model_training/figure/
+Methane_dataset/code/model_save/

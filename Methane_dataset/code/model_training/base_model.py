@@ -50,6 +50,12 @@ class TemporalDataset(Dataset):
             elif data_source == "seq":
                 self.input_files = [f"../../processed_data/TEM-MDM/sequence/temporal/input_{year}.npy" for year in years]
                 self.output_files = [f"../../processed_data/TEM-MDM/sequence/temporal/output_{year}.npy" for year in years]
+            elif data_source == "sparse":
+                self.input_files = [f"../../processed_data/TEM-MDM/sparse/temporal/input_{year}.npy" for year in years]
+                self.output_files = [f"../../processed_data/TEM-MDM/sparse/temporal/output_{year}.npy" for year in years]
+            elif data_source == "1percent":
+                self.input_files = [f"../../processed_data/TEM-MDM/1percent/temporal/input_{year}.npy" for year in years]
+                self.output_files = [f"../../processed_data/TEM-MDM/1percent/temporal/output_{year}.npy" for year in years]
         elif args.data_type == "random":
             self.input_files = [f"../../processed_data/TEM-MDM/temporal/input_{year}.npy" for year in years]
             self.output_files = [f"../../processed_data/TEM-MDM/temporal/output_{year}.npy" for year in years]
@@ -302,17 +308,17 @@ def main():
                     warm_up = 1979 + config.num_context_years
                     train_years = range(warm_up, 1999)
                     test_years = range(1999, 2019)
-                    train_dataset = HierarchicalTemporalDataset(train_years, config, all_years)
+                    train_dataset = HierarchicalTemporalDataset(train_years, config, all_years, "1percent")
                     train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-                    test_dataset = HierarchicalTemporalDataset(test_years, config, all_years)
+                    test_dataset = HierarchicalTemporalDataset(test_years, config, all_years, "seq")
                     test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
                     hierarchy_train(args.epoch, train_dataloader, test_dataloader) 
             else: # other models, same dataset handler
                 train_years = range(1979, 1999)
-                train_dataset = TemporalDataset(train_years, "seq")
+                train_dataset = TemporalDataset(train_years, "1percent")
                 train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
                 test_years = range(1999, 2019)
-                test_dataset = TemporalDataset(test_years, "full")
+                test_dataset = TemporalDataset(test_years, "seq")
                 test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
                 obs_train(args.epoch, train_dataloader, test_dataloader)         
         else: # simulated spatial dataset

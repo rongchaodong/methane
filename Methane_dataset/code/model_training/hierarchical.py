@@ -13,7 +13,7 @@ class HierarchicalTemporalDataset(Dataset):
     2. x_yearly: slow features: (B, num_context_years, K_slow=10), 10 features
     3. y_target: the y_batch shaped in (B, T=365)
     """
-    def __init__(self, target_years, config, all_available_years_range):
+    def __init__(self, target_years, config, all_available_years_range, data_source : str):
         self.target_years = list(target_years)
         self.config = config
         self.all_available_years = list(all_available_years_range)
@@ -21,8 +21,12 @@ class HierarchicalTemporalDataset(Dataset):
         self.K_slow = 10 
         self.K_fast = 5 
 
-        self.input_files = {year: f"../../processed_data/TEM-MDM/sequence/temporal/input_{year}.npy" for year in self.all_available_years}
-        self.output_files = {year: f"../../processed_data/TEM-MDM/sequence/temporal/output_{year}.npy" for year in self.target_years}
+        if data_source == "1percent":
+            self.input_files = {year: f"../../processed_data/TEM-MDM/1percent/temporal/input_{year}.npy" for year in self.all_available_years}
+            self.output_files = {year: f"../../processed_data/TEM-MDM/1percent/temporal/output_{year}.npy" for year in self.target_years}
+        elif data_source == "seq":
+            self.input_files = {year: f"../../processed_data/TEM-MDM/sequence/temporal/input_{year}.npy" for year in self.all_available_years}
+            self.output_files = {year: f"../../processed_data/TEM-MDM/sequence/temporal/output_{year}.npy" for year in self.target_years}
         self.mean_vals = np.load('../../data/TEM-MDM/mean_vals.npy')
         self.std_vals = np.load('../../data/TEM-MDM/std_vals.npy')
 

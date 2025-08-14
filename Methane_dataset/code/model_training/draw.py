@@ -72,7 +72,7 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
 
     try:
         if model_str == "hierarchy":
-            path = f'../model_save/{model_str}/base_{model_str}-{year}.pth'
+            path = f'../model_save/{model_str}/base-{year}.pth'
         elif args.simulated:
             path = f'../model_save/{model_str}/base.pth'
         else:
@@ -87,7 +87,7 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
         test_years = range(1999, 2019)
         if model_str == "hierarchy":
             all_years = range(1979, 2019)
-            test_dataset = HierarchicalTemporalDataset(test_years, config, all_years)
+            test_dataset = HierarchicalTemporalDataset(test_years, config, all_years, "seq")
             test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
         else:
             test_dataset = TemporalDataset(test_years)
@@ -118,6 +118,8 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
                     _, prediction = model(batch_X)
                     print("shape", prediction.shape, batch_y.shape)
                     break
+            all_targets = batch_y.cpu()
+            all_predictions = prediction.cpu()
         else:
             for batch_X, batch_y in test_dataloader:
                 _, prediction = model(batch_X)
