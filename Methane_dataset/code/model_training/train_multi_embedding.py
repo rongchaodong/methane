@@ -1,4 +1,4 @@
-from hierarchical_multi_embedding import HierarchicalMultiEmbedding, HierarchicalTemporalDataset, HierarchicalSpatialDataset
+from hierarchical_multi_embedding import HierarchicalMultiEmbedding, HierarchicalTemporalDataset
 import numpy as np
 import torch
 import torch.nn as nn
@@ -49,10 +49,10 @@ def hierarchy_train(epoches : int, train_dataloader: DataLoader, test_dataloader
         logger.info(f'Epoch {epoch}: Training start.')
         running_loss = 0.0
         model.train()
-        for batch_X_daily, batch_x_yearly, batch_y in train_dataloader:
+        for batch_X_daily, batch_x_yearly, batch_y, batch_x_current_yearly in train_dataloader:
             if torch.isnan(batch_X_daily).any():
                 continue
-            _, prediction = model(batch_X_daily, batch_x_yearly)
+            _, prediction = model(batch_X_daily, batch_x_yearly, batch_x_current_yearly)
             # print("prediction shape:", prediction.shape)
             # print("batch_y shape:", batch_y.shape)
 
@@ -73,8 +73,8 @@ def hierarchy_train(epoches : int, train_dataloader: DataLoader, test_dataloader
         all_predictions = []
         all_targets = []
         with torch.no_grad():
-            for batch_X_daily, batch_x_yearly, batch_y in test_dataloader:
-                _, prediction = model(batch_X_daily, batch_x_yearly)
+            for batch_X_daily, batch_x_yearly, batch_y, batch_x_current_yearly in test_dataloader:
+                _, prediction = model(batch_X_daily, batch_x_yearly, batch_x_current_yearly)
                 all_predictions.append(prediction.cpu().numpy().reshape(-1))
                 all_targets.append(batch_y.cpu().numpy().reshape(-1))
 
@@ -121,9 +121,9 @@ def main():
             train_years = range(warm_up, 1999)
             test_years = range(1999, 2019)
             train_dataset = HierarchicalTemporalDataset(train_years, config, all_years, "1percent")
-            train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+            train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True)
             test_dataset = HierarchicalTemporalDataset(test_years, config, all_years, "seq")
-            test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
+            test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
             hierarchy_train(args.epoch, train_dataloader, test_dataloader) 
         else: # simulated spatial dataset
             years = range(1979, 2019)
