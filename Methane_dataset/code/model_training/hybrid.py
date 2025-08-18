@@ -27,12 +27,19 @@ class LSTM_Transformer(nn.Module):
         self.dropout = nn.Dropout(0.1)
         self.fc_out = nn.Linear(config.hidden_size, config.output_size)
 
+    def make_mask(self, src):
+        seq_len = src.shape[1]
+        mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1)
+        mask = mask.bool()
+        return mask
+
     def forward(self, x, year_index = False):
         lstm_out, _ = self.lstm(x)  # (B, T, H)
         x = lstm_out + self.positional_encoding[:, :x.size(1), :]  # Add PE
         x = self.norm(x)
         residual = x
-        x = self.transformer(x)
+        mask = self.make_mask(x)
+        x = self.transformer(x, mask=mask)
         x = x + residual  # residual connection
         x = self.dropout(x)
         if year_index == True:

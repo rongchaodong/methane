@@ -206,14 +206,12 @@ def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: Data
             best_r2 = r2
             if args.simulated:
                 torch.save(record_param, f'../model_save/{args.model}/base.pth')
+                logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
             else:
                 pass
                 # import time
                 # time.sleep(2)
                 # torch.save(record_param, f'../model_save/{args.model}/base_obs.pth')
-            logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
-            # import time
-            # time.sleep(1)
 
         else:
             wait += 1
@@ -309,14 +307,14 @@ def main():
                     train_years = range(warm_up, 1999)
                     test_years = range(1999, 2019)
                     train_dataset = HierarchicalTemporalDataset(train_years, config, all_years, "1percent")
-                    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+                    train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
                     test_dataset = HierarchicalTemporalDataset(test_years, config, all_years, "seq")
                     test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
                     hierarchy_train(args.epoch, train_dataloader, test_dataloader) 
             else: # other models, same dataset handler
                 train_years = range(1979, 1999)
-                train_dataset = TemporalDataset(train_years, "1percent")
-                train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+                train_dataset = TemporalDataset(train_years, "seq")
+                train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
                 test_years = range(1999, 2019)
                 test_dataset = TemporalDataset(test_years, "seq")
                 test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
@@ -370,27 +368,22 @@ def main():
             train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True)
             obs_train(args.epoch, train_dataloader, test_dataloader)
         else:
-            nrmse_list = []
-            r2_list = []
-            for test in range(5): 
-                train_x_list, train_y_list = [], []
-                for i in range(5):
-                    if test == i:
-                        test_x = torch.tensor(np.load(f"../../processed_data/FLUXNET-CH4/spatial/data_x_{i}.npy"), dtype=torch.float32)
-                        test_y = torch.tensor(np.load(f"../../processed_data/FLUXNET-CH4/spatial/data_y_{i}.npy"), dtype=torch.float32)
-                    else:
-                        train_x_list.append(np.load(f"../../processed_data/FLUXNET-CH4/spatial/data_x_{i}.npy"))
-                        train_y_list.append(np.load(f"../../processed_data/FLUXNET-CH4/spatial/data_y_{i}.npy"))
-                train_x = torch.tensor(np.concatenate(train_x_list, axis=0), dtype=torch.float32)
-                train_y = torch.tensor(np.concatenate(train_y_list, axis=0), dtype=torch.float32)
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                test_dataset = Dataset(test_x.to(device), test_y.to(device))
-                test_dataloader = DataLoader(test_dataset, batch_size=4, shuffle=False)
-                train_dataset = Dataset(train_x.to(device), train_y.to(device))
-                train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=False)
-                nrmse, r2 = obs_train(args.epoch, train_dataloader, test_dataloader)
-                nrmse_list.append(nrmse)
-                r2_list.append(r2)
-            logger.info(f'testing average nrmse {sum(nrmse_list)/len(nrmse_list):.4f}, r2 score {sum(r2_list)/len(r2_list):.4f}')
+            test = 3
+            train_x_list, train_y_list = [], []
+            for i in range(5):
+                if test == i:
+                    test_x = torch.tensor(np.load(f"../../processed_data/FLUXNET-CH4/spatial/data_x_{i}.npy"), dtype=torch.float32)
+                    test_y = torch.tensor(np.load(f"../../processed_data/FLUXNET-CH4/spatial/data_y_{i}.npy"), dtype=torch.float32)
+                else:
+                    train_x_list.append(np.load(f"../../processed_data/FLUXNET-CH4/spatial/data_x_{i}.npy"))
+                    train_y_list.append(np.load(f"../../processed_data/FLUXNET-CH4/spatial/data_y_{i}.npy"))
+            train_x = torch.tensor(np.concatenate(train_x_list, axis=0), dtype=torch.float32)
+            train_y = torch.tensor(np.concatenate(train_y_list, axis=0), dtype=torch.float32)
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            test_dataset = Dataset(test_x.to(device), test_y.to(device))
+            test_dataloader = DataLoader(test_dataset, batch_size=4, shuffle=False)
+            train_dataset = Dataset(train_x.to(device), train_y.to(device))
+            train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=False)
+            obs_train(args.epoch, train_dataloader, test_dataloader)
 
 main()

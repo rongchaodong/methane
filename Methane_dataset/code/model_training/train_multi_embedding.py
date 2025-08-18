@@ -37,6 +37,7 @@ logger = logging.getLogger()
 model = HierarchicalMultiEmbedding(10, 8, 5, 8, 1).to(config.device)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
 def hierarchy_train(epoches : int, train_dataloader: DataLoader, test_dataloader: DataLoader):
     #hyperparameter
