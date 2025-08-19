@@ -21,7 +21,7 @@ class LSTM_Transformer(nn.Module):
             batch_first=True,
             norm_first=True
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=1)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=3)
 
         self.norm = nn.LayerNorm(config.hidden_size)
         self.dropout = nn.Dropout(0.1)
@@ -38,7 +38,7 @@ class LSTM_Transformer(nn.Module):
         x = lstm_out + self.positional_encoding[:, :x.size(1), :]  # Add PE
         x = self.norm(x)
         residual = x
-        mask = self.make_mask(x)
+        mask = self.make_mask(x).to(x.device)
         x = self.transformer(x, mask=mask)
         x = x + residual  # residual connection
         x = self.dropout(x)

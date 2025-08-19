@@ -232,7 +232,7 @@ class Transformer(nn.Module):
     
     def forward(self, src):
         # print(src.shape)
-        mask = self.make_mask(src)
+        mask = self.make_mask(src).to(src.device)
         src_emb = self.embedding(src) 
         transformer_out = self.transformer(src_emb, mask=mask)
         output = self.fc_out(transformer_out) 
