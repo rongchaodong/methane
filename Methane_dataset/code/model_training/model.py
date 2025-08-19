@@ -16,11 +16,18 @@ class LSTM(nn.Module):
         self.hidden_size = configs.hidden_size
         self.num_layers = configs.num_layers
         self.lstm = nn.LSTM(configs.input_size, configs.hidden_size, configs.num_layers, batch_first=True)
+
+        self.head = nn.Sequential(
+            nn.Linear(configs.hidden_size, configs.hidden_size * 4),
+            nn.ReLU(),
+            nn.Linear(configs.hidden_size * 4, configs.output_size)
+        )
         self.fc = nn.Linear(configs.hidden_size, configs.output_size)
     
     def forward(self, x):
         out, _ = self.lstm(x)  
-        final_out = self.fc(out)  
+        final_out = self.head(out)
+        # final_out = self.fc(out)  
         return out, final_out.squeeze()
     
 class EALSTM(nn.Module):
