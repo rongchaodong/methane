@@ -39,6 +39,10 @@ model = HierarchicalMultiEmbedding(10, 8, 5, 8, 1).to(config.device)
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
+model.load_state_dict(torch.load(f'../model_save/mul-emb/base-8.pth', weights_only=True))
+total_params = sum(p.numel() for p in model.parameters())
+print(f"模型的参数量为: {total_params}")
+
 def hierarchy_train(epoches : int, train_dataloader: DataLoader, test_dataloader: DataLoader):
     #hyperparameter
     patience = 10
@@ -49,25 +53,25 @@ def hierarchy_train(epoches : int, train_dataloader: DataLoader, test_dataloader
     for epoch in range(epoches):
         logger.info(f'Epoch {epoch}: Training start.')
         running_loss = 0.0
-        model.train()
-        for batch_X_daily, batch_x_yearly, batch_y, batch_x_current_yearly in train_dataloader:
-            if torch.isnan(batch_X_daily).any():
-                continue
-            _, prediction = model(batch_X_daily, batch_x_yearly, batch_x_current_yearly)
-            # print("prediction shape:", prediction.shape)
-            # print("batch_y shape:", batch_y.shape)
+        # model.train()
+        # for batch_X_daily, batch_x_yearly, batch_y, batch_x_current_yearly in train_dataloader:
+        #     if torch.isnan(batch_X_daily).any():
+        #         continue
+        #     _, prediction = model(batch_X_daily, batch_x_yearly, batch_x_current_yearly)
+        #     # print("prediction shape:", prediction.shape)
+        #     # print("batch_y shape:", batch_y.shape)
 
-            loss = criterion(prediction, batch_y)  # 保证 shape: [B, 1]
+        #     loss = criterion(prediction, batch_y)  # 保证 shape: [B, 1]
 
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+        #     optimizer.zero_grad()
+        #     loss.backward()
+        #     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        #     optimizer.step()
 
-            running_loss += loss.item()
+        #     running_loss += loss.item()
 
-        avg_loss = math.sqrt(running_loss / len(train_dataloader))
-        logger.info(f'Epoch {epoch}: Training loss {avg_loss*23:.4f}')
+        # avg_loss = math.sqrt(running_loss / len(train_dataloader))
+        # logger.info(f'Epoch {epoch}: Training loss {avg_loss*23:.4f}')
 
         model.eval()
         logger.info(f'Epoch {epoch}: eval start.')
@@ -121,10 +125,10 @@ def main():
             warm_up = 1979 + config.num_context_years
             train_years = range(warm_up, 1999)
             test_years = range(1999, 2019)
-            train_dataset = HierarchicalTemporalDataset(train_years, config, all_years, "1percent")
+            train_dataset = HierarchicalTemporalDataset(train_years, config, all_years, "seq")
             train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True)
             test_dataset = HierarchicalTemporalDataset(test_years, config, all_years, "seq")
-            test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+            test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=True)
             hierarchy_train(args.epoch, train_dataloader, test_dataloader) 
         else: # simulated spatial dataset
             years = range(1979, 2019)

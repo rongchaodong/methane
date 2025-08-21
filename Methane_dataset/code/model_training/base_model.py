@@ -142,6 +142,8 @@ if args.model == 'hierarchy' and args.data_type == "random" and not args.simulat
 
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+# total_params = sum(p.numel() for p in model.parameters())
+# print(f"模型 {args.model} 的参数量为: {total_params}")
 
 def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: DataLoader):
     #hyperparameter
@@ -208,11 +210,11 @@ def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: Data
                 torch.save(record_param, f'../model_save/{args.model}/base.pth')
                 logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
             else:
-                # pass
-                import time
-                time.sleep(1)
-                torch.save(record_param, f'../model_save/{args.model}/base_obs.pth')
-                logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
+                pass
+                # import time
+                # time.sleep(1)
+                # torch.save(record_param, f'../model_save/{args.model}/base_obs.pth')
+                # logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
 
         else:
             wait += 1
@@ -369,7 +371,7 @@ def main():
             train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True)
             obs_train(args.epoch, train_dataloader, test_dataloader)
         else:
-            test = 3
+            test = 4
             train_x_list, train_y_list = [], []
             for i in range(5):
                 if test == i:
