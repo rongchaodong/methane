@@ -67,8 +67,6 @@ class HierarchicalTemporalDataset(Dataset):
         full_input_sample = np.load(self.input_files[actual_year], mmap_mode='r')[file_idx]
         normalized_input = (full_input_sample - self.mean_vals) / self.std_vals
         x_daily = normalized_input[:, self.K_slow:]
-
-        x_current_yearly = normalized_input[0, :self.K_slow]
         
         y_target = np.load(self.output_files[actual_year], mmap_mode='r')[file_idx] / 23
 
@@ -88,8 +86,7 @@ class HierarchicalTemporalDataset(Dataset):
         return (
             torch.tensor(x_daily, dtype=torch.float32).to(config.device),
             x_yearly.to(config.device),
-            torch.tensor(y_target, dtype=torch.float32).to(config.device),
-            torch.tensor(x_current_yearly, dtype=torch.float32).to(config.device)
+            torch.tensor(y_target, dtype=torch.float32).to(config.device)
         )
 
 
@@ -119,7 +116,7 @@ class MultiYearEncoder(nn.Module):
 
 
 class YearAttention(nn.Module):
-    def __init__(self, hidden_dim, daily_input_dim=5, num_heads=5):
+    def __init__(self, hidden_dim, daily_input_dim=5, num_heads=4):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
@@ -127,16 +124,16 @@ class YearAttention(nn.Module):
         # 将日度特征投影到年度特征空间
         self.daily_to_annual_proj = nn.Linear(daily_input_dim, hidden_dim * 2)
         
-        self.current_year_proj = nn.Linear(10, 10)
+        self.current_year_proj = nn.Linear(hidden_dim * 2, hidden_dim)
         
-        self.context_year_proj = nn.Linear(10, 10)
+        self.context_year_proj = nn.Linear(hidden_dim * 2, hidden_dim)
         
-        self.attention = nn.MultiheadAttention(10, num_heads, batch_first=True)
+        self.attention = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
         
         self.weight_proj = nn.Sequential(
-            nn.Linear(10, 10),
+            nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(10, 1)
+            nn.Linear(hidden_dim // 2, 1)
         )
         
     def forward(self, current_year_features, context_year_embeddings):
@@ -146,15 +143,14 @@ class YearAttention(nn.Module):
         B, T, K_fast = current_year_features.shape
         B, context_len, H = context_year_embeddings.shape
         
-        # # 将当前年份的日度特征聚合为年度特征
-        # current_year_agg = current_year_features.mean(dim=1)  # [B, K_fast]
+        # 将当前年份的日度特征聚合为年度特征
+        current_year_agg = current_year_features.mean(dim=1)  # [B, K_fast]
         
-        # # 先将日度特征投影到年度特征空间
-        # current_year_annual = self.daily_to_annual_proj(current_year_agg)  # [B, 2H]
+        # 先将日度特征投影到年度特征空间
+        current_year_annual = self.daily_to_annual_proj(current_year_agg)  # [B, 2H]
         
-        # # 投影到相同的维度空间
-        # current_year_proj = self.current_year_proj(current_year_annual).unsqueeze(1)  # [B, 1, H]
-        current_year_proj = self.current_year_proj(current_year_features) # [B, 1, H]
+        # 投影到相同的维度空间
+        current_year_proj = self.current_year_proj(current_year_annual).unsqueeze(1)  # [B, 1, H]
         context_year_proj = self.context_year_proj(context_year_embeddings)  # [B, context_len, H]
         
         # 计算注意力权重
@@ -168,7 +164,6 @@ class YearAttention(nn.Module):
         importance_weights = torch.softmax(
             self.weight_proj(context_year_proj).squeeze(-1), dim=1
         )  # [B, context_len]
-        print("importance weights: ", importance_weights)
         
         # 结合注意力权重和重要性权重
         final_weights = (attn_weights.squeeze(1) + importance_weights) / 2  # [B, context_len]
@@ -181,19 +176,19 @@ class WeightedContextDecoder(nn.Module):
     """
     根据权重对context年份信息进行加权融合
     """
-    def __init__(self, daily_input_dim, daily_hidden_dim, context_dim, output_dim=1, num_heads=5, dropout=0.1):
+    def __init__(self, daily_input_dim, daily_hidden_dim, context_dim, output_dim=1, num_heads=4, dropout=0.1):
         super().__init__()
-        self.lstm = nn.LSTM(daily_input_dim, 10, num_layers=3, batch_first=True)
+        self.lstm = nn.LSTM(daily_input_dim, daily_hidden_dim, num_layers=3, batch_first=True)
         
         # 将context信息投影到日度特征空间
-        self.context_proj = nn.Linear(10, 10)
+        self.context_proj = nn.Linear(context_dim, daily_hidden_dim)
         
         # 多头注意力机制
-        self.multihead_attn = nn.MultiheadAttention(10, num_heads, dropout=dropout, batch_first=True)
-        self.norm = nn.LayerNorm(10)
+        self.multihead_attn = nn.MultiheadAttention(daily_hidden_dim, num_heads, dropout=dropout, batch_first=True)
+        self.norm = nn.LayerNorm(daily_hidden_dim)
         
         # 输出层
-        self.fc = nn.Linear(10, output_dim)
+        self.fc = nn.Linear(daily_hidden_dim, output_dim)
         
     def forward(self, x_daily, weighted_context):
         # x_daily: [B, 365, K_fast]
@@ -210,7 +205,6 @@ class WeightedContextDecoder(nn.Module):
             key=context_proj.expand(-1, lstm_out.size(1), -1),
             value=context_proj.expand(-1, lstm_out.size(1), -1)
         )
-        print("decoder attention weight: ", attn_weights.shape, attn_weights.mean(dim=1))
         
         # 残差连接和层归一化
         combined = self.norm(lstm_out + attn_output)
@@ -228,31 +222,18 @@ class HierarchicalMultiEmbedding(nn.Module):
         self.attention = YearAttention(annual_hidden_dim, daily_input_dim)
         self.decoder = WeightedContextDecoder(daily_input_dim, daily_hidden_dim, annual_hidden_dim * 2, output_dim)
         
-    def forward(self, x_daily, x_yearly, x_current_yearly):
+    def forward(self, x_daily, x_yearly):
         # x_daily: [B, 365, K_fast]
         # x_yearly: [B, context_len, K_slow]
         
-        print("x_current_yearly: ", x_current_yearly)
-        x_current_yearly = x_current_yearly.unsqueeze(1)
-        print("x_current_yearly: ", x_current_yearly)
-        print("x_yearly: ", x_yearly)
         # 1. 为每个context年份生成独立的embedding
-        # context_year_embeddings = self.encoder(x_yearly)  # [B, context_len, 2H]
-        context_year_embeddings = x_yearly
-        print("context_year_embeddings: ", context_year_embeddings.shape, context_year_embeddings)
+        context_year_embeddings = self.encoder(x_yearly)  # [B, context_len, 2H]
         
         # 2. 计算当前年份与历史年份的相关性权重
-        # year_weights, attn_weights = self.attention(x_daily, context_year_embeddings)  # [B, context_len]
-
-        # x_current_yearly = self.encoder(x_current_yearly)
-        print("x_current_yearly: ", x_current_yearly.shape, x_current_yearly)
-        year_weights, attn_weights = self.attention(x_current_yearly, context_year_embeddings)  # [B, context_len]
-        print("year_weights: ", year_weights)
-        print("attn_weights: ", attn_weights)
+        year_weights, attn_weights = self.attention(x_daily, context_year_embeddings)  # [B, context_len]
         
         # 3. 根据权重对context年份信息进行加权融合
         weighted_context = (context_year_embeddings * year_weights.unsqueeze(-1)).sum(dim=1)  # [B, 2H]
-        print("weighted_context: ", weighted_context)
         
         prediction, daily_attn_weights = self.decoder(x_daily, weighted_context)
         exit()
