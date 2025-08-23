@@ -236,6 +236,5 @@ class HierarchicalMultiEmbedding(nn.Module):
         weighted_context = (context_year_embeddings * year_weights.unsqueeze(-1)).sum(dim=1)  # [B, 2H]
         
         prediction, daily_attn_weights = self.decoder(x_daily, weighted_context)
-        exit()
         
         return prediction, prediction
