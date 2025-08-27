@@ -6,6 +6,9 @@ from torch.utils.data import DataLoader, Dataset
 from model import LSTM, Transformer
 from hybrid import LSTM_Transformer
 from hierarchical import Hierarchical, HierarchicalTemporalDataset
+from hierarchical_x_y import EnhancedHierarchicalMultiEmbedding
+from hierarchical_x_y import HierarchicalTemporalDataset as hierarchy_temporal_x_y
+from cross_feature_attention import ImprovedCrossFeatureAttentionModel
 from config import Config
 import argparse
 
@@ -69,14 +72,20 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
         model = LSTM_Transformer(config).to(config.device)
     elif model_str == "hierarchy":
         model = Hierarchical(10, 8, 5, 8, 1).to(config.device)
+    elif model_str == "mul-emb":
+        model = EnhancedHierarchicalMultiEmbedding(11, 8, 5, 8, 1).to(config.device)
+    elif model_str == "cross":
+        model = ImprovedCrossFeatureAttentionModel(config).to(config.device)
 
     try:
         if model_str == "hierarchy":
             path = f'../model_save/{model_str}/base-{year}.pth'
+        elif model_str == "mul-emb":
+            path = f'../model_save/{model_str}/base-{year}.pth'
         elif args.simulated:
             path = f'../model_save/{model_str}/base.pth'
         else:
-            path = f'../model_save/{model_str}/base_obs.pth'
+            path = f'../model_save/{model_str}/base_obs-2.pth'
         model.load_state_dict(torch.load(path, weights_only=True))
     except FileNotFoundError:
         print(path)
@@ -88,6 +97,10 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
         if model_str == "hierarchy":
             all_years = range(1979, 2019)
             test_dataset = HierarchicalTemporalDataset(test_years, config, all_years, "seq")
+            test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
+        elif model_str == "mul-emb":
+            all_years = range(1979, 2019)
+            test_dataset = hierarchy_temporal_x_y(test_years, config, all_years, "seq")
             test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
         else:
             test_dataset = TemporalDataset(test_years)
@@ -107,7 +120,7 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
     all_targets = []
     with torch.no_grad():
         if simulated:
-            if model_str == "hierarchy":
+            if model_str == "hierarchy" or model_str == "mul-emb":
                 for batch_X_daily, batch_x_yearly, batch_y in test_dataloader:
                     if torch.isnan(batch_X_daily).any():
                         continue
@@ -136,12 +149,12 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
         plt.grid(True)
         plt.tight_layout()
         if simulated:
-            if model_str == "hierarchy":
+            if model_str == "hierarchy" or model_str == "mul-emb":
                 plt.savefig(f'figure/prediction_TEM_{model_str}-{year}.png')
             else:
                 plt.savefig(f'figure/prediction_TEM_{model_str}.png')
         else:
-            plt.savefig(f'figure/prediction_OBS_{model_str}-{args.index}.png')
+            plt.savefig(f'figure/prediction_OBS_{model_str}-{args.index}-1.png')
 
 
 yearly_draw(args.model, args.simulated, args.context, args.index)
