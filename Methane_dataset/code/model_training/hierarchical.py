@@ -221,28 +221,6 @@ class AnnualEncoder(nn.Module):
         return context
 
 
-class CrossAttention(nn.Module):
-    def __init__(self, daily_hidden_dim, annual_context_dim):
-        super(CrossAttention, self).__init__()
-        self.query_layer = nn.Linear(daily_hidden_dim, annual_context_dim)
-
-    def forward(self, daily_hidden, annual_context):
-        # daily_hidden: [B, 365, H_d]
-        # annual_context: [B, H_y]
-        B, T, H_d = daily_hidden.shape
-        annual_context = annual_context.unsqueeze(1)  # [B, 1, H_y]
-        query = self.query_layer(daily_hidden)        # [B, 365, H_y]
-
-        # Dot-product attention score: [B, 365, 1]
-        energy = torch.bmm(query, annual_context.transpose(1, 2)) / (H_d ** 0.5)
-        attention_weights = F.softmax(energy, dim=1)  # [B, 365, 1]
-
-        # context = weighted sum of annual_context (broadcasted): [B, 365, H_y]
-        context = attention_weights * annual_context
-
-        return context, attention_weights.squeeze(-1)  # [B, 365, H_y], [B, 365]
-
-
 class DailyDecoder(nn.Module):
     def __init__(self, daily_input_dim, daily_hidden_dim, annual_context_dim, output_dim=1, num_heads=4, dropout=0.1):
         super(DailyDecoder, self).__init__()
