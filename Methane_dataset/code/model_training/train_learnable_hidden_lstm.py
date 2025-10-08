@@ -118,8 +118,8 @@ class LearnableHiddenTemporalDataset(Dataset):
         y_current = torch.tensor(y_current, dtype=torch.float32)
         historical_inputs = torch.stack([torch.tensor(h, dtype=torch.float32) for h in historical_inputs])
         historical_outputs = torch.stack([torch.tensor(h, dtype=torch.float32) for h in historical_outputs])
-        
-        return x_current, historical_inputs, y_current, historical_outputs
+
+        return x_current.to(config.device), historical_inputs.to(config.device), y_current.to(config.device), historical_outputs.to(config.device)
 
 class LearnableHiddenSpatialDataset(Dataset):
     def __init__(self, years, folds, historical_years=5):
@@ -249,6 +249,7 @@ def train_learnable_hidden_lstm(epochs: int, train_dataloader: DataLoader, test_
             )
             
             # Compute main task loss
+            # print("pred shape:", predictions.shape, "batch y shape:", batch_y.shape)
             main_loss = criterion(predictions, batch_y)
             total_loss = main_loss + inner_loss * args.inner_loss_weight
             

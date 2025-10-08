@@ -78,7 +78,6 @@ class InnerModel(nn.Module):
             outputs = []
             for year in range(num_years):
                 year_data = x[:, year, :].unsqueeze(1)  # (batch_size, 1, input_size)
-                print(f"Year {year} data shape: {year_data.shape}")
                 lstm_out, _ = self.model(year_data)
                 outputs.append(lstm_out[:, -1, :])  # (batch_size, hidden_size)
             output = torch.stack(outputs, dim=1)  # (batch_size, num_years, hidden_size)
@@ -143,13 +142,13 @@ class LearnableHiddenStateLSTM(nn.Module):
     def forward(self, x, historical_data=None, historical_targets=None, training_inner=True):
         """
         Args:
-            x: (batch_size, seq_len, input_size) - 当前序列数据
-            historical_data: (batch_size, num_years, seq_len, historical_input_size) - 历史数据
-            historical_targets: (batch_size, num_years, seq_len, output_size) - 历史目标值
-            training_inner: bool - 是否训练inner模型
+            x: (batch_size, seq_len, input_size)
+            historical_data: (batch_size, num_years, seq_len, historical_input_size)
+            historical_targets: (batch_size, num_years, seq_len)
+            training_inner: bool 
         Returns:
-            outputs: (batch_size, seq_len, output_size) - 预测输出
-            inner_loss: float - inner模型损失
+            outputs: (batch_size, seq_len, output_size) 
+            inner_loss: float 
         """
         batch_size, seq_len, _ = x.shape
         device = x.device
@@ -182,7 +181,7 @@ class LearnableHiddenStateLSTM(nn.Module):
                 attention_weights, weighted_historical = self.historical_attention(
                     h_states[-1], historical_data[:, :, t, :]  # Get historical data for current timestep
                 )
-                
+
                 # Process historical information through inner model
                 historical_features = self.inner_model(historical_data[:, :, t, :])
                 
@@ -201,7 +200,7 @@ class LearnableHiddenStateLSTM(nn.Module):
                     inner_predictions = self.output_projection(historical_features)
                     inner_loss = self._compute_inner_loss(
                         inner_predictions, 
-                        historical_targets[:, :, t, :],
+                        historical_targets[:, :, t:t+1],
                         attention_weights
                     )
                     inner_losses.append(inner_loss)
@@ -216,7 +215,7 @@ class LearnableHiddenStateLSTM(nn.Module):
         # Compute total inner model loss
         inner_loss = torch.mean(torch.stack(inner_losses)) if inner_losses else torch.tensor(0.0, device=device)
         
-        return final_outputs, inner_loss
+        return final_outputs.squeeze(-1), inner_loss
     
     def _compute_inner_loss(self, predictions, targets, attention_weights):
         """
@@ -244,7 +243,7 @@ class LearnableHiddenStateLSTM(nn.Module):
         Returns:
             outputs: (batch_size, seq_len, output_size)
         """
-        return self.forward(x, historical_data, training_inner=True)[0]
+        return self.forward(x, historical_data, training_inner=False)[0]
 
 class LearnableHiddenStateLSTMWrapper(nn.Module):
     """Wrapper class providing simpler interface"""
@@ -280,49 +279,49 @@ class LearnableHiddenStateLSTMWrapper(nn.Module):
         """Only perform prediction"""
         return self.model.predict_with_historical(x, historical_data)
 
-# Example usage and test code
-def test_learnable_hidden_state_lstm():
-    """Test learnable hidden state LSTM model"""
-    # Parameter settings
-    batch_size = 4
-    seq_len = 365  # One year of data
-    input_size = 10
-    hidden_size = 64
-    output_size = 1
-    historical_years = 5
+# # Example usage and test code
+# def test_learnable_hidden_state_lstm():
+#     """Test learnable hidden state LSTM model"""
+#     # Parameter settings
+#     batch_size = 4
+#     seq_len = 365  # One year of data
+#     input_size = 10
+#     hidden_size = 64
+#     output_size = 1
+#     historical_years = 5
     
-    # Create model
-    model = LearnableHiddenStateLSTMWrapper(
-        input_size=input_size,
-        hidden_size=hidden_size,
-        output_size=output_size,
-        historical_years=historical_years,
-        inner_model_type='lstm'
-    )
+#     # Create model
+#     model = LearnableHiddenStateLSTMWrapper(
+#         input_size=input_size,
+#         hidden_size=hidden_size,
+#         output_size=output_size,
+#         historical_years=historical_years,
+#         inner_model_type='lstm'
+#     )
     
-    # Create test data
-    x = torch.randn(batch_size, seq_len, input_size)
-    historical_data = torch.randn(batch_size, historical_years, seq_len, input_size)
-    historical_targets = torch.randn(batch_size, historical_years, seq_len, output_size)
+#     # Create test data
+#     x = torch.randn(batch_size, seq_len, input_size)
+#     historical_data = torch.randn(batch_size, historical_years, seq_len, input_size)
+#     historical_targets = torch.randn(batch_size, historical_years, seq_len, output_size)
     
-    print(f"Input shape: {x.shape}")
-    print(f"Historical data shape: {historical_data.shape}")
-    print(f"Historical targets shape: {historical_targets.shape}")
+#     print(f"Input shape: {x.shape}")
+#     print(f"Historical data shape: {historical_data.shape}")
+#     print(f"Historical targets shape: {historical_targets.shape}")
     
-    # Forward pass
-    outputs, total_loss, inner_loss = model(x, historical_data, historical_targets)
+#     # Forward pass
+#     outputs, total_loss, inner_loss = model(x, historical_data, historical_targets)
     
-    print(f"Output shape: {outputs.shape}")
-    print(f"Total loss: {total_loss.item():.4f}")
-    print(f"Inner model loss: {inner_loss.item():.4f}")
+#     print(f"Output shape: {outputs.shape}")
+#     print(f"Total loss: {total_loss.item():.4f}")
+#     print(f"Inner model loss: {inner_loss.item():.4f}")
     
-    # Prediction only mode
-    predictions = model.predict(x, historical_data)
-    print(f"Prediction shape: {predictions.shape}")
+#     # Prediction only mode
+#     predictions = model.predict(x, historical_data)
+#     print(f"Prediction shape: {predictions.shape}")
     
-    return model
+#     return model
 
-if __name__ == "__main__":
-    # Run test
-    model = test_learnable_hidden_state_lstm()
-    print("Model test completed!")
+# if __name__ == "__main__":
+#     # Run test
+#     model = test_learnable_hidden_state_lstm()
+#     print("Model test completed!")
