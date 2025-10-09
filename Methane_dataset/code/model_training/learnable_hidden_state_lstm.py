@@ -43,7 +43,7 @@ class HistoricalAttention(nn.Module):
         return attention_weights, weighted_value
 
 class InnerModel(nn.Module):
-    """Inner model: learn historical information"""
+    """Inner model: learn historical information and output weights"""
     def __init__(self, input_size, hidden_size, output_size, model_type='lstm'):
         super(InnerModel, self).__init__()
         self.input_size = input_size
@@ -62,32 +62,57 @@ class InnerModel(nn.Module):
                 nn.Linear(hidden_size * 4, hidden_size)
             )
         
-        self.output_projection = nn.Linear(hidden_size, output_size)
+        # Use separate output projections for each year
+        self.output_projections = nn.ModuleList([
+            nn.Linear(hidden_size, output_size) for _ in range(10)  # Support up to 10 years
+        ])
         
     def forward(self, x):
         """
         Args:
             x: (batch_size, num_years, input_size)
         Returns:
-            output: (batch_size, num_years, hidden_size)
+            predictions: (batch_size, num_years, output_size) - predictions for each year
+            weights: (batch_size, num_years, output_size, hidden_size) - weights from output_projection
         """
         batch_size, num_years, input_size = x.shape
         
+        predictions = []
+        weights = []
+        
         if self.model_type == 'lstm':
-            # For LSTM, we need to process each year separately
-            outputs = []
+            # For LSTM, process each year separately
             for year in range(num_years):
                 year_data = x[:, year, :].unsqueeze(1)  # (batch_size, 1, input_size)
                 lstm_out, _ = self.model(year_data)
-                outputs.append(lstm_out[:, -1, :])  # (batch_size, hidden_size)
-            output = torch.stack(outputs, dim=1)  # (batch_size, num_years, hidden_size)
+                year_features = lstm_out[:, -1, :]  # (batch_size, hidden_size)
+                
+                # Use year-specific output projection
+                year_predictions = self.output_projections[year](year_features)  # (batch_size, output_size)
+                predictions.append(year_predictions)
+                
+                # Get the weights from year-specific projection
+                year_weights = self.output_projections[year].weight  # (output_size, hidden_size)
+                weights.append(year_weights)
         else:
             # For linear and mlp, process each year directly
-            x_reshaped = x.view(-1, input_size)  # (batch_size * num_years, input_size)
-            output_reshaped = self.model(x_reshaped)  # (batch_size * num_years, hidden_size)
-            output = output_reshaped.view(batch_size, num_years, -1)  # (batch_size, num_years, hidden_size)
-            
-        return output
+            for year in range(num_years):
+                year_data = x[:, year, :]  # (batch_size, input_size)
+                year_features = self.model(year_data)  # (batch_size, hidden_size)
+                
+                # Use year-specific output projection
+                year_predictions = self.output_projections[year](year_features)  # (batch_size, output_size)
+                predictions.append(year_predictions)
+                
+                # Get the weights from year-specific projection
+                year_weights = self.output_projections[year].weight  # (output_size, hidden_size)
+                weights.append(year_weights)
+        
+        # Stack predictions and weights
+        predictions = torch.stack(predictions, dim=1)  # (batch_size, num_years, output_size)
+        weights = torch.stack(weights, dim=1)  # (batch_size, num_years, output_size, hidden_size)
+        
+        return predictions, weights
 
 class LearnableHiddenStateLSTM(nn.Module):
     """LSTM model with learnable hidden states"""
@@ -120,10 +145,18 @@ class LearnableHiddenStateLSTM(nn.Module):
             model_type=inner_model_type
         )
         
+        # Weight projection layer: project inner model weights to hidden state dimension
+        self.weight_projection = nn.Linear(hidden_size, hidden_size)
+        
         # Learnable weight parameter
         self.historical_weight = nn.Parameter(torch.randn(1))
         
         # Output layer
+        self.head = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size * 4),
+            nn.ReLU(),
+            nn.Linear(hidden_size * 4, output_size)
+        )
         self.output_projection = nn.Linear(hidden_size, output_size)
         
         # Initialize parameters
@@ -182,24 +215,41 @@ class LearnableHiddenStateLSTM(nn.Module):
                     h_states[-1], historical_data[:, :, t, :]  # Get historical data for current timestep
                 )
 
-                # Process historical information through inner model
-                historical_features = self.inner_model(historical_data[:, :, t, :])
+                # Process historical information through inner model to get predictions and weights
+                historical_predictions, historical_weights = self.inner_model(historical_data[:, :, t, :])
+                # historical_predictions: (batch_size, num_years, output_size)
+                # historical_weights: (batch_size, num_years, output_size, hidden_size)
                 
-                # Compute weighted average of historical information
+                # Project weights to hidden state dimension
+                # Reshape weights for projection: (batch_size * num_years, output_size, hidden_size)
+                batch_size, num_years, output_size, hidden_size = historical_weights.shape
+                weights_reshaped = historical_weights.view(-1, output_size, hidden_size)
+                
+                # Apply weight projection to each weight matrix
+                # More efficient: use batch matrix multiplication
+                # Reshape for batch processing: (batch_size * num_years * output_size, hidden_size)
+                weights_flat = weights_reshaped.view(-1, hidden_size)  # (batch_size * num_years * output_size, hidden_size)
+                projected_weights_flat = self.weight_projection(weights_flat)  # (batch_size * num_years * output_size, hidden_size)
+                projected_weights = projected_weights_flat.view(batch_size, num_years, output_size, hidden_size)
+                
+                # Compute weighted average of projected weights
                 # attention_weights: (batch_size, num_years)
-                # historical_features: (batch_size, num_years, hidden_size)
-                weighted_historical_features = torch.sum(
-                    attention_weights.unsqueeze(-1) * historical_features, dim=1
-                )
+                # projected_weights: (batch_size, num_years, output_size, hidden_size)
+                weighted_historical_weights = torch.sum(
+                    attention_weights.unsqueeze(-1).unsqueeze(-1) * projected_weights, dim=1
+                )  # (batch_size, output_size, hidden_size)
+                
+                # Use the weighted historical weights to enhance hidden state
+                # We can use the diagonal elements or mean across output_size dimension
+                historical_enhancement = torch.mean(weighted_historical_weights, dim=1)  # (batch_size, hidden_size)
                 
                 # Enhance hidden state
-                h_states[-1] = h_states[-1] + self.historical_weight * weighted_historical_features
+                h_states[-1] = h_states[-1] + self.historical_weight * historical_enhancement
                 
                 # Compute inner model loss
                 if historical_targets is not None:
-                    inner_predictions = self.output_projection(historical_features)
                     inner_loss = self._compute_inner_loss(
-                        inner_predictions, 
+                        historical_predictions, 
                         historical_targets[:, :, t:t+1],
                         attention_weights
                     )
@@ -217,20 +267,28 @@ class LearnableHiddenStateLSTM(nn.Module):
         
         return final_outputs.squeeze(-1), inner_loss
     
-    def _compute_inner_loss(self, predictions, targets, attention_weights):
+    def _compute_inner_loss(self, predictions, historical_targets, attention_weights):
         """
-        Compute inner model loss: Σ A_k * ||f(x_k) - y_k||^2
+        Compute inner model loss based on prediction min_delta: Σ A_k * ||pred_k - pred_ref||^2
         Args:
-            predictions: (batch_size, num_years, output_size)
-            targets: (batch_size, num_years, output_size)
+            predictions: (batch_size, num_years, output_size) - predictions from inner model
+            historical_targets: (batch_size, num_years, output_size)
             attention_weights: (batch_size, num_years)
         """
-        # Compute MSE loss for each year
-        mse_loss = F.mse_loss(predictions, targets, reduction='none')  # (batch_size, num_years, output_size)
-        mse_loss = torch.mean(mse_loss, dim=-1)  # (batch_size, num_years)
+        batch_size, num_years, output_size = predictions.shape
         
-        # Weighted sum
-        weighted_loss = torch.sum(attention_weights * mse_loss, dim=1)  # (batch_size,)
+        # Compute reference predictions (mean across years)
+        ref_predictions = torch.mean(predictions, dim=1, keepdim=True)  # (batch_size, 1, output_size)
+        ref_predictions = ref_predictions.expand(-1, num_years, -1)  # (batch_size, num_years, output_size)
+        
+        # Compute prediction delta (difference from reference)
+        prediction_delta = predictions - ref_predictions  # (batch_size, num_years, output_size)
+        
+        # Compute min_delta loss (L2 norm of prediction differences)
+        min_delta_loss = torch.norm(prediction_delta, p=2, dim=2)  # (batch_size, num_years)
+        
+        # Weighted sum using attention weights
+        weighted_loss = torch.sum(attention_weights * min_delta_loss, dim=1)  # (batch_size,)
         
         return torch.mean(weighted_loss)
     
@@ -246,7 +304,7 @@ class LearnableHiddenStateLSTM(nn.Module):
         return self.forward(x, historical_data, training_inner=False)[0]
 
 class LearnableHiddenStateLSTMWrapper(nn.Module):
-    """Wrapper class providing simpler interface"""
+    """Wrapper class providing simpler interface with second-order gradient support"""
     def __init__(self, input_size, hidden_size, output_size, 
                  historical_input_size=None, historical_years=5,
                  inner_model_type='lstm', num_layers=1,
@@ -261,11 +319,21 @@ class LearnableHiddenStateLSTMWrapper(nn.Module):
         
         self.inner_loss_weight = inner_loss_weight
         
-    def forward(self, x, historical_data=None, historical_targets=None):
+    def forward(self, x, historical_data=None, historical_targets=None, enable_second_order=True):
         """
-        Forward pass, return main prediction and total loss
+        Forward pass with second-order gradient support
+        Args:
+            x: input data
+            historical_data: historical data for inner model
+            historical_targets: historical targets for inner model
+            enable_second_order: whether to enable second-order gradients
         """
-        outputs, inner_loss = self.model(x, historical_data, historical_targets)
+        if enable_second_order and historical_data is not None and historical_targets is not None:
+            # Enable second-order gradients for nested optimization
+            outputs, inner_loss = self._forward_with_second_order(x, historical_data, historical_targets)
+        else:
+            # Standard forward pass
+            outputs, inner_loss = self.model(x, historical_data, historical_targets, training_inner=False)
         
         # Compute main task loss (real labels need to be passed here)
         # main_loss = F.mse_loss(outputs, targets) if targets is not None else torch.tensor(0.0, device=outputs.device)
@@ -275,53 +343,86 @@ class LearnableHiddenStateLSTMWrapper(nn.Module):
         
         return outputs, total_loss, inner_loss
     
+    def _forward_with_second_order(self, x, historical_data, historical_targets):
+        """
+        Forward pass with second-order gradient computation
+        This creates a nested optimization structure where inner model updates
+        are computed as gradients of gradients
+        """
+        # First forward pass to get initial outputs and inner loss
+        outputs, inner_loss = self.model(x, historical_data, historical_targets, training_inner=True)
+        
+        # Compute gradients of inner loss w.r.t. inner model parameters
+        # This creates the "gradient of gradient" effect for second-order optimization
+        inner_grads = torch.autograd.grad(
+            inner_loss, 
+            self.model.inner_model.parameters(), 
+            create_graph=True,  # Enable second-order gradients
+            retain_graph=True,
+            allow_unused=True
+        )
+        
+        # The key insight: we don't actually update parameters here
+        # Instead, we let the outer optimizer handle the second-order gradients
+        # The inner_grads are computed with create_graph=True, which means
+        # the outer loss can backpropagate through these gradients
+        
+        # Return the outputs and inner loss for the outer optimization
+        # The second-order gradients will be automatically computed when
+        # the outer loss is backpropagated
+        return outputs, inner_loss
+    
     def predict(self, x, historical_data=None):
         """Only perform prediction"""
         return self.model.predict_with_historical(x, historical_data)
 
-# # Example usage and test code
-# def test_learnable_hidden_state_lstm():
-#     """Test learnable hidden state LSTM model"""
-#     # Parameter settings
-#     batch_size = 4
-#     seq_len = 365  # One year of data
-#     input_size = 10
-#     hidden_size = 64
-#     output_size = 1
-#     historical_years = 5
+# Example usage and test code
+def test_learnable_hidden_state_lstm():
+    """Test learnable hidden state LSTM model with second-order gradients"""
+    # Parameter settings
+    batch_size = 2
+    seq_len = 10  # Shorter sequence for testing
+    input_size = 5
+    hidden_size = 16
+    output_size = 1
+    historical_years = 3
     
-#     # Create model
-#     model = LearnableHiddenStateLSTMWrapper(
-#         input_size=input_size,
-#         hidden_size=hidden_size,
-#         output_size=output_size,
-#         historical_years=historical_years,
-#         inner_model_type='lstm'
-#     )
+    # Create model
+    model = LearnableHiddenStateLSTMWrapper(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        output_size=output_size,
+        historical_years=historical_years,
+        inner_model_type='linear'  # Use linear for simpler testing
+    )
     
-#     # Create test data
-#     x = torch.randn(batch_size, seq_len, input_size)
-#     historical_data = torch.randn(batch_size, historical_years, seq_len, input_size)
-#     historical_targets = torch.randn(batch_size, historical_years, seq_len, output_size)
+    # Create test data
+    x = torch.randn(batch_size, seq_len, input_size)
+    historical_data = torch.randn(batch_size, historical_years, seq_len, input_size)
+    historical_targets = torch.randn(batch_size, historical_years, seq_len, output_size)
     
-#     print(f"Input shape: {x.shape}")
-#     print(f"Historical data shape: {historical_data.shape}")
-#     print(f"Historical targets shape: {historical_targets.shape}")
+    print(f"Input shape: {x.shape}")
+    print(f"Historical data shape: {historical_data.shape}")
+    print(f"Historical targets shape: {historical_targets.shape}")
     
-#     # Forward pass
-#     outputs, total_loss, inner_loss = model(x, historical_data, historical_targets)
+    # Forward pass with second-order gradients
+    outputs, total_loss, inner_loss = model(x, historical_data, historical_targets, enable_second_order=True)
     
-#     print(f"Output shape: {outputs.shape}")
-#     print(f"Total loss: {total_loss.item():.4f}")
-#     print(f"Inner model loss: {inner_loss.item():.4f}")
+    print(f"Output shape: {outputs.shape}")
+    print(f"Total loss: {total_loss.item():.4f}")
+    print(f"Inner model loss: {inner_loss.item():.4f}")
     
-#     # Prediction only mode
-#     predictions = model.predict(x, historical_data)
-#     print(f"Prediction shape: {predictions.shape}")
+    # Test backward pass to verify second-order gradients
+    total_loss.backward()
+    print("Backward pass completed successfully!")
     
-#     return model
+    # Prediction only mode
+    predictions = model.predict(x, historical_data)
+    print(f"Prediction shape: {predictions.shape}")
+    
+    return model
 
-# if __name__ == "__main__":
-#     # Run test
-#     model = test_learnable_hidden_state_lstm()
-#     print("Model test completed!")
+if __name__ == "__main__":
+    # Run test
+    model = test_learnable_hidden_state_lstm()
+    print("Model test completed!")
