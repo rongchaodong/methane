@@ -250,9 +250,11 @@ class AnnualEncoder(nn.Module):
             year_predictions = self.output_projections[year](context)  # [B, output_dim]
             predictions.append(year_predictions)
             
-            # Get the weights from year-specific projection
+            # Get the weights from year-specific projection and expand to batch dimension
             year_weights = self.output_projections[year].weight  # [output_dim, 2H]
-            weights.append(year_weights)
+            # Expand to batch dimension: [B, output_dim, 2H]
+            year_weights_expanded = year_weights.unsqueeze(0).expand(batch_size, -1, -1)
+            weights.append(year_weights_expanded)
         
         # Stack predictions and weights
         predictions = torch.stack(predictions, dim=1)  # [B, context_len, output_dim]
@@ -308,10 +310,16 @@ class DailyDecoder(nn.Module):
         
         # Copy weights from the original LSTM
         for i, cell in enumerate(lstm_cells):
-            cell.weight_ih.data = self.lstm.weight_ih_l0.data if i == 0 else getattr(self.lstm, f'weight_ih_l{i}').data
-            cell.weight_hh.data = self.lstm.weight_hh_l0.data if i == 0 else getattr(self.lstm, f'weight_hh_l{i}').data
-            cell.bias_ih.data = self.lstm.bias_ih_l0.data if i == 0 else getattr(self.lstm, f'bias_ih_l{i}').data
-            cell.bias_hh.data = self.lstm.bias_hh_l0.data if i == 0 else getattr(self.lstm, f'bias_hh_l{i}').data
+            weight_ih_name = f'weight_ih_l{i}'
+            weight_hh_name = f'weight_hh_l{i}'
+            bias_ih_name = f'bias_ih_l{i}'
+            bias_hh_name = f'bias_hh_l{i}'
+            
+            # Copy weights and biases
+            cell.weight_ih.data = getattr(self.lstm, weight_ih_name).data
+            cell.weight_hh.data = getattr(self.lstm, weight_hh_name).data
+            cell.bias_ih.data = getattr(self.lstm, bias_ih_name).data
+            cell.bias_hh.data = getattr(self.lstm, bias_hh_name).data
         
         # Initialize hidden states
         h_states = [torch.zeros(batch_size, self.lstm.hidden_size, device=device) for _ in range(3)]
