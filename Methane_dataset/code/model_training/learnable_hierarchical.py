@@ -233,13 +233,8 @@ class AnnualEncoder(nn.Module):
         historical_flat = historical_inputs.view(-1, seq_len, input_size)
         gru_out, _ = self.gru(historical_flat)  # [B*context_len, seq_len, 2H]
         
-        # Get the last output for each year
-        gru_out_last = gru_out[:, -1, :]  # [B*context_len, 2H]
-        gru_out_last = gru_out_last.view(batch_size, context_len, -1)  # [B, context_len, 2H]
+        gru_out = gru_out.view(batch_size, context_len, seq_len, -1)  # [B, context_len, 2H]
         
-        # Compute attention weights
-        attn_weights = torch.softmax(self.attn(gru_out_last), dim=1)  # [B, context_len, 1]
-        context = (attn_weights * gru_out_last).sum(dim=1)  # [B, 2H]
         
         # Generate predictions and weights for each year
         predictions = []
@@ -247,7 +242,7 @@ class AnnualEncoder(nn.Module):
         
         for year in range(context_len):
             # Use year-specific output projection
-            year_predictions = self.output_projections[year](context)  # [B, output_dim]
+            year_predictions = self.output_projections[year](gru_out[:, year, :, :])  # [B, seq_len, output_dim]
             predictions.append(year_predictions)
             
             # Get the weights from year-specific projection and expand to batch dimension
@@ -257,10 +252,9 @@ class AnnualEncoder(nn.Module):
             weights.append(year_weights_expanded)
         
         # Stack predictions and weights
-        predictions = torch.stack(predictions, dim=1)  # [B, context_len, output_dim]
+        predictions = torch.stack(predictions, dim=1)  # [B, context_len, seq_len, output_dim]
         weights = torch.stack(weights, dim=1)  # [B, context_len, output_dim, 2H]
-        
-        return context, predictions, weights, attn_weights.squeeze(-1)
+        return predictions, weights
 
 
 class DailyDecoder(nn.Module):
@@ -276,10 +270,9 @@ class DailyDecoder(nn.Module):
 
         self.fc = nn.Linear(daily_hidden_dim, output_dim)
 
-    def forward(self, x_current, annual_context, annual_weights=None, attention_weights=None):
+    def forward(self, x_current, annual_weights=None, attention_weights=None):
         # x_current: [B, 365, input_size=15] - all features
-        # annual_context: [B, annual_context_dim]
-        # annual_weights: [B, context_len, output_dim, annual_context_dim]
+        # annual_weights: [B, context_len, output_dim, 2H]
         # attention_weights: [B, context_len]
 
         batch_size, seq_len, _ = x_current.shape
@@ -297,12 +290,17 @@ class DailyDecoder(nn.Module):
             projected_weights = projected_weights_flat.view(batch_size, context_len, output_dim, self.weight_projection.out_features)
             
             # Compute weighted average of projected weights
+            # attention_weights: [B, context_len]
+            # projected_weights: [B, context_len, output_dim=1, hidden_dim=8]
             weighted_historical_weights = torch.sum(
                 attention_weights.unsqueeze(-1).unsqueeze(-1) * projected_weights, dim=1
-            )  # [B, output_dim, daily_hidden_dim]
+            )  # [B, output_dim, hidden_dim]
             
             # Use the weighted historical weights to enhance LSTM hidden states
-            historical_enhancement = torch.mean(weighted_historical_weights, dim=1)  # [B, daily_hidden_dim]
+            historical_enhancement = weighted_historical_weights.squeeze(1)  # [B, daily_hidden_dim]
+
+            # normalize historical enhancement: scale to [-1, 1]
+            historical_enhancement = 2 * (historical_enhancement - historical_enhancement.min()) / (historical_enhancement.max() - historical_enhancement.min()) - 1
         
         # Use LSTMCell for step-by-step processing with historical enhancement
         lstm_cells = [nn.LSTMCell(self.lstm.input_size if i == 0 else self.lstm.hidden_size, 
@@ -325,6 +323,13 @@ class DailyDecoder(nn.Module):
         h_states = [torch.zeros(batch_size, self.lstm.hidden_size, device=device) for _ in range(3)]
         c_states = [torch.zeros(batch_size, self.lstm.hidden_size, device=device) for _ in range(3)]
         
+        # Apply historical enhancement to the final layer's hidden state, and maintain tanh scale
+        # initial the last layer into historical enhancement, not sure useful
+        # I can also try to use zero as hidden state, but let's try this first
+        if historical_enhancement is not None:
+            h_states[-1] = (h_states[-1] + self.historical_weight * historical_enhancement) / (1 + torch.abs(self.historical_weight))
+        # print("enhanced hidden state: ", h_states[-1])
+        # exit()
         outputs = []
         
         # Step-by-step LSTM processing with historical enhancement
@@ -339,25 +344,22 @@ class DailyDecoder(nn.Module):
                     input_t = h_states[layer-1]
                 
                 h_states[layer], c_states[layer] = lstm_cells[layer](input_t, (h_states[layer], c_states[layer]))
-            
-            # Apply historical enhancement to the final layer's hidden state
-            if historical_enhancement is not None:
-                h_states[-1] = h_states[-1] + self.historical_weight * historical_enhancement
-            
+
             # Store output
             outputs.append(h_states[-1].unsqueeze(1))  # [B, 1, hidden_size]
         
         # Concatenate all outputs
         lstm_out_enhanced = torch.cat(outputs, dim=1)  # [B, seq_len, hidden_size]
         
-        prediction = self.fc(lstm_out_enhanced).squeeze(-1)
+        prediction = self.fc(lstm_out_enhanced).squeeze(-1) # [B, 365]
 
-        return prediction, attention_weights if attention_weights is not None else torch.ones(1)  # prediction:[B, 365]
+        return prediction  # prediction:[B, 365]
 
 
 class Hierarchical(nn.Module):
     def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1):
         super(Hierarchical, self).__init__()
+        self.cross_attn = nn.MultiheadAttention(embed_dim=input_dim, num_heads=1, batch_first=True)
         self.encoder = AnnualEncoder(input_dim, annual_hidden_dim, output_dim)
         self.decoder = DailyDecoder(input_dim, daily_hidden_dim, annual_hidden_dim * 2, output_dim)
 
@@ -366,11 +368,18 @@ class Hierarchical(nn.Module):
         # historical_inputs: [B, context_len, 365, input_size=15] - historical year data
         # historical_targets: [B, context_len, 365] - historical target Y for self-supervised learning
         
+        attention_weights = self.cross_attn(
+            query=x_current.mean(dim=1, keepdim=True),  # [B, 1, input_size]
+            key=historical_inputs.mean(dim=2),  # [B, context_len, input_size]
+            value=historical_inputs.mean(dim=2)   # [B, context_len, input_size]
+        )[1].squeeze(1) # [B, context_len]
+        # print("attention weights:", attention_weights)
+        # exit()
         # Get annual context, predictions, weights, and attention weights
-        annual_context, annual_predictions, annual_weights, attention_weights = self.encoder(historical_inputs, historical_targets)
+        annual_predictions, annual_weights = self.encoder(historical_inputs, historical_targets)
         
         # Get main prediction
-        prediction, _ = self.decoder(x_current, annual_context, annual_weights, attention_weights)
+        prediction = self.decoder(x_current, annual_weights, attention_weights)
         
         # Compute inner model loss for self-supervised learning
         inner_loss = torch.tensor(0.0, device=x_current.device)
@@ -383,23 +392,14 @@ class Hierarchical(nn.Module):
         """
         Compute inner model loss using historical targets for self-supervised learning
         Args:
-            predictions: [B, context_len, output_dim] - predictions from annual encoder
+            predictions: [B, context_len, seq_len=365, output_dim] - predictions from annual encoder
             historical_targets: [B, context_len, 365] - historical target Y
             attention_weights: [B, context_len]
         """
         batch_size, context_len, seq_len = historical_targets.shape
         
-        # Expand predictions to match historical targets sequence length
-        # For simplicity, we'll use the predictions as is (assuming output_dim=1)
-        # In practice, you might want to expand predictions to full sequence length
-        if predictions.shape[-1] == 1:
-            # If predictions are scalar, expand to sequence length
-            predictions_expanded = predictions.expand(-1, -1, seq_len)  # [B, context_len, 365]
-        else:
-            predictions_expanded = predictions  # [B, context_len, 365]
-        
         # Compute MSE loss between predictions and historical targets
-        mse_loss = F.mse_loss(predictions_expanded, historical_targets, reduction='none')  # [B, context_len, 365]
+        mse_loss = F.mse_loss(predictions.squeeze(-1), historical_targets, reduction='none')  # [B, context_len, 365]
         
         # Average over sequence dimension
         mse_loss = torch.mean(mse_loss, dim=2)  # [B, context_len]
@@ -431,7 +431,7 @@ class LearnableHierarchicalWrapper(nn.Module):
             # Enable second-order gradients for nested optimization (only during training)
             outputs, inner_loss = self._forward_with_second_order(x_current, historical_inputs, historical_targets)
         else:
-            # Standard forward pass (during evaluation or when second-order is disabled)
+            # Standard forward pass (during evaluation)
             outputs, inner_loss = self.model(x_current, historical_inputs, historical_targets, training_inner=False)
         
         total_loss = inner_loss * self.inner_loss_weight
