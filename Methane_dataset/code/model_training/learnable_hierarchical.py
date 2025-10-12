@@ -427,11 +427,11 @@ class LearnableHierarchicalWrapper(nn.Module):
             historical_targets: historical target Y for self-supervised learning [B, context_len, 365]
             enable_second_order: whether to enable second-order gradients
         """
-        if enable_second_order and historical_targets is not None:
-            # Enable second-order gradients for nested optimization
+        if enable_second_order and historical_targets is not None and self.training:
+            # Enable second-order gradients for nested optimization (only during training)
             outputs, inner_loss = self._forward_with_second_order(x_current, historical_inputs, historical_targets)
         else:
-            # Standard forward pass
+            # Standard forward pass (during evaluation or when second-order is disabled)
             outputs, inner_loss = self.model(x_current, historical_inputs, historical_targets, training_inner=False)
         
         total_loss = inner_loss * self.inner_loss_weight
@@ -449,13 +449,21 @@ class LearnableHierarchicalWrapper(nn.Module):
         
         # Compute gradients of inner loss w.r.t. inner model parameters
         # This creates the "gradient of gradient" effect for second-order optimization
-        inner_grads = torch.autograd.grad(
-            inner_loss, 
-            self.model.encoder.parameters(), 
-            create_graph=True,  # Enable second-order gradients
-            retain_graph=True,
-            allow_unused=True
-        )
+        try:
+            inner_grads = torch.autograd.grad(
+                inner_loss, 
+                self.model.encoder.parameters(), 
+                create_graph=True,  # Enable second-order gradients
+                retain_graph=True,
+                allow_unused=True
+            )
+        except RuntimeError as e:
+            if "does not require grad" in str(e):
+                # If gradients are not available, fall back to standard forward pass
+                outputs, inner_loss = self.model(x_current, historical_inputs, historical_targets, training_inner=False)
+                return outputs, inner_loss
+            else:
+                raise e
         
         # The key insight: we don't actually update parameters here
         # Instead, we let the outer optimizer handle the second-order gradients
