@@ -220,7 +220,7 @@ class AnnualEncoder(nn.Module):
         self.attn = nn.Linear(hidden_dim * 2, 1)
         self.output_projection = nn.Linear(hidden_dim * 2, output_dim)
         
-        # Use separate output projections for each year
+        # Use separate output projections for each year, I need to change it into Batchsize, as we want to get weights for each location
         self.output_projections = nn.ModuleList([
             nn.Linear(hidden_dim * 2, output_dim) for _ in range(10)  # Support up to 10 years
         ])
@@ -260,7 +260,7 @@ class AnnualEncoder(nn.Module):
 class DailyDecoder(nn.Module):
     def __init__(self, input_dim, daily_hidden_dim, annual_context_dim, output_dim=1, num_heads=4, dropout=0.1):
         super(DailyDecoder, self).__init__()
-        self.lstm = nn.LSTM(input_dim, daily_hidden_dim, num_layers=3, batch_first=True)
+        self.lstm = nn.LSTM(input_dim, daily_hidden_dim, num_layers=1, batch_first=True)
         
         # Weight projection layer: project annual weights to LSTM hidden state dimension
         self.weight_projection = nn.Linear(annual_context_dim, daily_hidden_dim)
@@ -269,6 +269,11 @@ class DailyDecoder(nn.Module):
         self.historical_weight = nn.Parameter(torch.randn(1))
 
         self.fc = nn.Linear(daily_hidden_dim, output_dim)
+        self.head = nn.Sequential(
+            nn.Linear(daily_hidden_dim, daily_hidden_dim * 4),
+            nn.ReLU(),
+            nn.Linear(daily_hidden_dim * 4, output_dim)
+        )
 
     def forward(self, x_current, annual_weights=None, attention_weights=None):
         # x_current: [B, 365, input_size=15] - all features
@@ -301,27 +306,13 @@ class DailyDecoder(nn.Module):
 
             # normalize historical enhancement: scale to [-1, 1]
             historical_enhancement = 2 * (historical_enhancement - historical_enhancement.min()) / (historical_enhancement.max() - historical_enhancement.min()) - 1
+            historical_enhancement = historical_enhancement.unsqueeze(0)  # [1, B, daily_hidden_dim]
         
-        # Use LSTMCell for step-by-step processing with historical enhancement
-        lstm_cells = [nn.LSTMCell(self.lstm.input_size if i == 0 else self.lstm.hidden_size, 
-                                 self.lstm.hidden_size).to(device) for i in range(3)]
-        
-        # Copy weights from the original LSTM
-        for i, cell in enumerate(lstm_cells):
-            weight_ih_name = f'weight_ih_l{i}'
-            weight_hh_name = f'weight_hh_l{i}'
-            bias_ih_name = f'bias_ih_l{i}'
-            bias_hh_name = f'bias_hh_l{i}'
-            
-            # Copy weights and biases
-            cell.weight_ih.data = getattr(self.lstm, weight_ih_name).data
-            cell.weight_hh.data = getattr(self.lstm, weight_hh_name).data
-            cell.bias_ih.data = getattr(self.lstm, bias_ih_name).data
-            cell.bias_hh.data = getattr(self.lstm, bias_hh_name).data
         
         # Initialize hidden states
-        h_states = [torch.zeros(batch_size, self.lstm.hidden_size, device=device) for _ in range(3)]
-        c_states = [torch.zeros(batch_size, self.lstm.hidden_size, device=device) for _ in range(3)]
+        h_states = [torch.zeros(1, batch_size, self.lstm.hidden_size, device=device) for _ in range(1)]
+        c_states = [torch.zeros(1, batch_size, self.lstm.hidden_size, device=device) for _ in range(1)]
+
         
         # Apply historical enhancement to the final layer's hidden state, and maintain tanh scale
         # initial the last layer into historical enhancement, not sure useful
@@ -330,28 +321,11 @@ class DailyDecoder(nn.Module):
             h_states[-1] = (h_states[-1] + self.historical_weight * historical_enhancement) / (1 + torch.abs(self.historical_weight))
         # print("enhanced hidden state: ", h_states[-1])
         # exit()
-        outputs = []
-        
-        # Step-by-step LSTM processing with historical enhancement
-        for t in range(seq_len):
-            x_t = x_current[:, t, :]  # [B, input_size=15]
-            
-            # Process through each LSTM layer
-            for layer in range(3):
-                if layer == 0:
-                    input_t = x_t
-                else:
-                    input_t = h_states[layer-1]
-                
-                h_states[layer], c_states[layer] = lstm_cells[layer](input_t, (h_states[layer], c_states[layer]))
 
-            # Store output
-            outputs.append(h_states[-1].unsqueeze(1))  # [B, 1, hidden_size]
-        
-        # Concatenate all outputs
-        lstm_out_enhanced = torch.cat(outputs, dim=1)  # [B, seq_len, hidden_size]
-        
-        prediction = self.fc(lstm_out_enhanced).squeeze(-1) # [B, 365]
+
+        lstm_out_enhanced, _ = self.lstm(x_current, (h_states[-1], c_states[-1]))  # [B, seq_len, hidden_size]
+
+        prediction = self.head(lstm_out_enhanced).squeeze(-1) # [B, 365]
 
         return prediction  # prediction:[B, 365]
 

@@ -21,8 +21,10 @@ parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
 parser.add_argument("--annual_hidden_size", type=int, default=16, help="Hidden size for annual encoder")
 parser.add_argument("--daily_hidden_size", type=int, default=8, help="Hidden size for daily decoder")
 parser.add_argument("--inner_loss_weight", type=float, default=1.0, help="Weight for inner model loss")
+parser.add_argument("--context_years", type=int, default=4, help="Number of context years for hierarchical model")
 args = parser.parse_args()
 
+config.num_context_years = args.context_years
 # Setup logging
 logging.basicConfig(
     filename=f"log/learnable_hierarchical_{args.data_type}_{args.type}.log",
@@ -42,9 +44,10 @@ model = LearnableHierarchicalWrapper(
 ).to(config.device)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
 
 def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test_dataloader: DataLoader):
-    patience = 5 if args.simulated else 100
+    patience = 10 if args.simulated else 100
     min_delta = 1e-4 if args.simulated else 1e-5
     wait = 0
     r2_max = -10.0
@@ -104,8 +107,11 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
         rmse = np.sqrt(mean_squared_error(all_targets[mask], all_predictions[mask]))
         nrmse = rmse / np.mean(all_targets[mask])
         r2 = r2_score(all_targets[mask], all_predictions[mask])
+
+        scheduler.step(r2)
+        current_lr = optimizer.param_groups[0]['lr']
         
-        logger.info(f'Testing RMSE {rmse:.4f}, NRMSE {nrmse:.4f}, R2 score {r2:.4f}')
+        logger.info(f'LR {current_lr} Testing RMSE {rmse:.4f}, NRMSE {nrmse:.4f}, R2 score {r2:.4f}')
         
         # Early stopping check
         if r2 > r2_max + min_delta:
@@ -116,10 +122,10 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
             best_r2 = r2
             
             if args.simulated:
-                torch.save(record_param, f'../model_save/hierachy/base_model.pth')
+                torch.save(record_param, f'../model_save/hierarchical/base_model-{args.context_years}.pth')
                 logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
             else:
-                torch.save(record_param, f'../model_save/hierachy/base_obs.pth')
+                torch.save(record_param, f'../model_save/hierarchical/base_obs.pth')
                 logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
         else:
             wait += 1
@@ -136,19 +142,27 @@ def main():
         if args.type == "temporal":
             logger.info(f'Training learnable hierarchical model with {config.num_context_years} context years')
             all_years = range(1979, 2019)
-            train_years = range(1979, 1999)
+            train_years = range(1979 + config.num_context_years, 1999)
             test_years = range(1999, 2019)
             
             train_dataset = HierarchicalTemporalDataset(
                 train_years, config, all_years, args.data_type
             )
-            train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-            
+
+            if args.data_type == "1percent":
+                train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+            else:
+                train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+
             test_dataset = HierarchicalTemporalDataset(
                 test_years, config, all_years, args.data_type
             )
-            test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
-            
+
+            if args.data_type == "1percent":
+                test_dataloader = DataLoader(test_dataset, batch_size=64, shuffle=False)
+            else:
+                test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
+
             train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader)
             
         else:  # spatial
