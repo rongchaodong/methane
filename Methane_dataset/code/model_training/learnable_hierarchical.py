@@ -220,9 +220,9 @@ class AnnualEncoder(nn.Module):
         self.attn = nn.Linear(hidden_dim * 2, 1)
         self.output_projection = nn.Linear(hidden_dim * 2, output_dim)
         
-        # Use separate output projections for each year, I need to change it into Batchsize, as we want to get weights for each location
+        # Use separate output projections for each each location, that means each location has multiple years information, which means the larger the context years, the more powerful and more precise location information
         self.output_projections = nn.ModuleList([
-            nn.Linear(hidden_dim * 2, output_dim) for _ in range(10)  # Support up to 10 years
+            nn.Linear(hidden_dim * 2, output_dim) for _ in range(config.batch_size)  # Support up to 10 years
         ])
 
     def forward(self, historical_inputs, historical_targets=None):  # [B, context_len, seq_len, input_size]
@@ -240,20 +240,27 @@ class AnnualEncoder(nn.Module):
         predictions = []
         weights = []
         
-        for year in range(context_len):
+        for loc in range(batch_size):
+            # print(batch_size, context_len, seq_len, input_size)
             # Use year-specific output projection
-            year_predictions = self.output_projections[year](gru_out[:, year, :, :])  # [B, seq_len, output_dim]
-            predictions.append(year_predictions)
+            loc_predictions = self.output_projections[loc](gru_out[loc, :, :, :])  # [context_len, seq_len, output_dim]
+            # print("loc_predictions shape:", loc_predictions.shape)
+            predictions.append(loc_predictions)
             
             # Get the weights from year-specific projection and expand to batch dimension
-            year_weights = self.output_projections[year].weight  # [output_dim, 2H]
-            # Expand to batch dimension: [B, output_dim, 2H]
-            year_weights_expanded = year_weights.unsqueeze(0).expand(batch_size, -1, -1)
+            year_weights = self.output_projections[loc].weight  # [output_dim, 2H]
+            # print("year_weights shape:", year_weights.shape)
+            year_weights_expanded = year_weights.unsqueeze(0).expand(context_len, -1, -1) # [context_len, output_dim, 2H]
             weights.append(year_weights_expanded)
+            # print("year_weights_expanded shape:", year_weights_expanded.shape)
+            # exit()
         
         # Stack predictions and weights
-        predictions = torch.stack(predictions, dim=1)  # [B, context_len, seq_len, output_dim]
-        weights = torch.stack(weights, dim=1)  # [B, context_len, output_dim, 2H]
+        predictions = torch.stack(predictions, dim=0)  # [B, context_len, seq_len, output_dim]
+        weights = torch.stack(weights, dim=0)  # [B, context_len, output_dim, 2H]
+        # print("predictions shape:", predictions.shape)
+        # print("weights shape:", weights.shape)
+        # exit()
         return predictions, weights
 
 

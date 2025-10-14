@@ -22,9 +22,11 @@ parser.add_argument("--annual_hidden_size", type=int, default=16, help="Hidden s
 parser.add_argument("--daily_hidden_size", type=int, default=8, help="Hidden size for daily decoder")
 parser.add_argument("--inner_loss_weight", type=float, default=1.0, help="Weight for inner model loss")
 parser.add_argument("--context_years", type=int, default=4, help="Number of context years for hierarchical model")
+parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
 args = parser.parse_args()
 
 config.num_context_years = args.context_years
+config.batch_size = args.batch_size
 # Setup logging
 logging.basicConfig(
     filename=f"log/learnable_hierarchical_{args.data_type}_{args.type}.log",
