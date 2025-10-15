@@ -29,7 +29,7 @@ config.num_context_years = args.context_years
 config.batch_size = args.batch_size
 # Setup logging
 logging.basicConfig(
-    filename=f"log/learnable_hierarchical_{args.data_type}_{args.type}.log",
+    filename=f"log/learnable_h_loc_{args.data_type}_{args.type}.log",
     filemode="a",
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -42,11 +42,12 @@ model = LearnableHierarchicalWrapper(
     annual_hidden_dim=args.annual_hidden_size,
     daily_hidden_dim=args.daily_hidden_size,
     output_dim=config.output_size,
-    inner_loss_weight=args.inner_loss_weight
+    inner_loss_weight=args.inner_loss_weight,
+    enable_contrastive=True
 ).to(config.device)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
 
 def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test_dataloader: DataLoader):
     patience = 10 if args.simulated else 100
@@ -58,6 +59,7 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
         logger.info(f'Epoch {epoch}: Training start.')
         running_loss = 0.0
         running_inner_loss = 0.0
+        running_contrastive_loss = 0.0
         model.train()
         
         for batch_x_current, batch_historical_inputs, batch_y, batch_historical_targets in train_dataloader:
@@ -65,7 +67,7 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
                 continue
             
             # Forward pass
-            predictions, total_loss, inner_loss = model(
+            predictions, total_loss, inner_loss, contrastive_loss = model(
                 batch_x_current, 
                 batch_historical_inputs, 
                 batch_historical_targets
@@ -73,7 +75,7 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
             
             # Compute main task loss
             main_loss = criterion(predictions, batch_y)
-            total_loss = main_loss + inner_loss * args.inner_loss_weight
+            total_loss = main_loss + total_loss
             
             optimizer.zero_grad()
             total_loss.backward()
@@ -82,11 +84,13 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
             
             running_loss += main_loss.item()
             running_inner_loss += inner_loss.item()
-        
+            running_contrastive_loss += contrastive_loss.item()
+
         avg_main_loss = math.sqrt(running_loss / len(train_dataloader))
         avg_inner_loss = running_inner_loss / len(train_dataloader)
-        logger.info(f'Epoch {epoch}: total loss {(avg_main_loss*23 + avg_inner_loss):.4f}, Main loss {avg_main_loss*23:.4f}, Inner loss {avg_inner_loss:.4f}')
-        
+        avg_contrastive_loss = running_contrastive_loss / len(train_dataloader)
+        logger.info(f'Epoch {epoch}: total loss {(avg_main_loss*23 + avg_inner_loss):.4f}, Main loss {avg_main_loss*23:.4f}, Inner loss {avg_inner_loss:.4f}, Contrastive loss {avg_contrastive_loss:.4f}')
+
         model.eval()
         logger.info(f'Epoch {epoch}: Eval start.')
         all_predictions = []
@@ -94,7 +98,7 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
         
         with torch.no_grad():
             for batch_x_current, batch_historical_inputs, batch_y, batch_historical_targets in test_dataloader:
-                predictions, _, _ = model(
+                predictions, _, _, _ = model(
                     batch_x_current, 
                     batch_historical_inputs, 
                     batch_historical_targets

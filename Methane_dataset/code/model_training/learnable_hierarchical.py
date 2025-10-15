@@ -3,9 +3,149 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 import numpy as np
+import math
 from config import Config
 
 config = Config()
+
+class ContrastiveLocationLearning(nn.Module):
+    """
+    Contrastive learning module for location-specific weights
+    Goal: Make location weights more representative and pure
+    """
+    def __init__(self, weight_dim, contrastive_dim=32, temperature=0.1, noise_std=0.05):
+        super().__init__()
+        self.weight_dim = weight_dim
+        self.contrastive_dim = contrastive_dim
+        self.temperature = nn.Parameter(torch.tensor(temperature))
+        self.noise_std = noise_std
+        
+        # Projection head for contrastive learning
+        self.projection_head = nn.Sequential(
+            nn.Linear(weight_dim, contrastive_dim),
+            nn.ReLU(),
+            nn.Linear(contrastive_dim, contrastive_dim),
+            nn.LayerNorm(contrastive_dim)
+        )
+        
+        # Adaptive weight scheduler
+        self.contrastive_weight = nn.Parameter(torch.tensor(1.0))
+        self.min_weight = 0.1
+        self.max_weight = 2.0
+        
+    def augment_weights(self, weights):
+        """
+        Data augmentation for location weights with stronger augmentation
+        Args:
+            weights: [B, context_len, output_dim, weight_dim]
+        Returns:
+            augmented_weights: [B, context_len, output_dim, weight_dim]
+        """
+        batch_size, context_len, output_dim, weight_dim = weights.shape
+        
+        # Create multiple augmented versions for better contrastive learning
+        augmented_versions = []
+        
+        for aug_idx in range(1):
+            # Add stronger Gaussian noise
+            noise = torch.randn_like(weights) * (self.noise_std * (1 + aug_idx * 0.5))
+            augmented = weights + noise
+            
+            # Time-based augmentation: create temporal variations
+            temporal_augmented = []
+            for i in range(batch_size):
+                loc_weights = augmented[i]  # [context_len, output_dim, weight_dim]
+                
+                # Method 1: Temporal smoothing with different weights
+                temporal_smooth = torch.mean(loc_weights, dim=0, keepdim=True).expand(context_len, -1, -1)
+                
+                # Method 2: Add temporal noise with different scales
+                temporal_noise = torch.randn_like(loc_weights) * (self.noise_std * (0.5 + aug_idx * 0.3))
+                temporal_variation = loc_weights + temporal_noise
+                
+                # Method 3: Random dropout-like augmentation
+                dropout_mask = torch.rand_like(loc_weights) > 0.1  # 10% dropout
+                dropout_augmented = loc_weights * dropout_mask.float()
+                
+                combined = 0.5 * temporal_variation + 0.5 * dropout_augmented
+                
+                temporal_augmented.append(combined)
+            
+            temporal_augmented = torch.stack(temporal_augmented, dim=0)
+            augmented_versions.append(temporal_augmented)
+        
+        # Return the first augmented version (you can modify this to return multiple versions)
+        return augmented_versions[0]
+    
+    def compute_contrastive_loss(self, weights):
+        """
+        Compute InfoNCE contrastive loss for location weights with improved sampling
+        Args:
+            weights: [B, context_len, output_dim, weight_dim]
+        Returns:
+            contrastive_loss: scalar tensor
+        """
+        batch_size, context_len, output_dim, weight_dim = weights.shape
+        
+        # Flatten weights for processing: [B*context_len*output_dim, weight_dim]
+        weights_flat = weights.view(-1, weight_dim)
+        
+        # Project to contrastive space
+        projected = self.projection_head(weights_flat)  # [B*context_len*output_dim, contrastive_dim]
+        
+        # Reshape back: [B, context_len*output_dim, contrastive_dim]
+        projected = projected.view(batch_size, context_len * output_dim, self.contrastive_dim)
+        
+        # Normalize for cosine similarity
+        projected = F.normalize(projected, dim=-1)
+        
+        # Improved contrastive loss computation
+        total_loss = 0.0
+        valid_pairs = 0
+        
+        for i in range(batch_size):
+            # Get representations for location i
+            anchor = projected[i]  # [context_len*output_dim, contrastive_dim]
+            
+            # Create positive samples: use augmented versions of the same location
+            # Method 1: Use different time steps as positive samples (but with more diversity)
+            if context_len * output_dim > 2:
+                # Randomly sample positive samples from the same location
+                num_pos = min(3, context_len * output_dim - 1)  # Use up to 3 positive samples
+                pos_indices = torch.randperm(context_len * output_dim - 1)[:num_pos] + 1
+                pos_samples = anchor[pos_indices]  # [num_pos, contrastive_dim]
+            else:
+                pos_samples = anchor[1:2]  # Use at least one positive sample
+            
+            # Create negative samples: use other locations
+            other_locations = torch.cat([projected[:i], projected[i+1:]], dim=0)  # [num_neg, context_len*output_dim, contrastive_dim]
+            neg_samples = other_locations.view(-1, self.contrastive_dim)  # [num_neg, contrastive_dim]
+            
+            if neg_samples.shape[0] > 0 and pos_samples.shape[0] > 0:
+                # Compute similarities efficiently
+                anchor_rep = anchor[0:1]  # [1, contrastive_dim]
+                
+                # Positive similarity
+                pos_sim = torch.matmul(anchor_rep, pos_samples.T) / self.temperature  # [1, num_pos]
+                
+                # Negative similarity (use more negative samples for better contrast)
+                max_neg_samples = min(neg_samples.shape[0], 32) 
+                neg_indices = torch.randperm(neg_samples.shape[0])[:max_neg_samples]
+                neg_samples_subset = neg_samples[neg_indices]
+                neg_sim = torch.matmul(anchor_rep, neg_samples_subset.T) / self.temperature  # [1, num_neg]
+                
+                # InfoNCE loss
+                logits = torch.cat([pos_sim, neg_sim], dim=1)  # [1, num_pos + num_neg]
+                labels = torch.zeros(1, dtype=torch.long, device=logits.device)
+                
+                loss = F.cross_entropy(logits, labels)
+                total_loss += loss
+                valid_pairs += 1
+        
+        if valid_pairs > 0:
+            return total_loss / valid_pairs
+        else:
+            return torch.tensor(0.0, device=weights.device)
 
 class HierarchicalTemporalDataset(Dataset):
     """
@@ -214,7 +354,7 @@ class HierarchicalSpatialDataset(Dataset):
 #         return h_n.squeeze(0)
 
 class AnnualEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim=1, num_layers=1):
+    def __init__(self, input_dim, hidden_dim, output_dim=1, num_layers=1, enable_contrastive=True):
         super().__init__()
         self.gru = nn.GRU(input_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=True)
         self.attn = nn.Linear(hidden_dim * 2, 1)
@@ -224,8 +364,18 @@ class AnnualEncoder(nn.Module):
         self.output_projections = nn.ModuleList([
             nn.Linear(hidden_dim * 2, output_dim) for _ in range(config.batch_size)  # Support up to 10 years
         ])
+        
+        # Contrastive learning module
+        self.enable_contrastive = enable_contrastive
+        if enable_contrastive:
+            self.contrastive_learning = ContrastiveLocationLearning(
+                weight_dim=hidden_dim * 2,  # GRU output dimension
+                contrastive_dim=hidden_dim * 2,  # Keep same dimension as weight_dim
+                temperature=0.1,  # Increased temperature for better learning
+                noise_std=0.05   # Increased noise for stronger augmentation
+            )
 
-    def forward(self, historical_inputs, historical_targets=None):  # [B, context_len, seq_len, input_size]
+    def forward(self, historical_inputs, historical_targets=None, compute_contrastive=True):  # [B, context_len, seq_len, input_size]
         batch_size, context_len, seq_len, input_size = historical_inputs.shape
         
         # Process each historical year through GRU
@@ -258,10 +408,18 @@ class AnnualEncoder(nn.Module):
         # Stack predictions and weights
         predictions = torch.stack(predictions, dim=0)  # [B, context_len, seq_len, output_dim]
         weights = torch.stack(weights, dim=0)  # [B, context_len, output_dim, 2H]
+        
+        # Compute contrastive loss if enabled
+        contrastive_loss = torch.tensor(0.0, device=historical_inputs.device)
+        if self.enable_contrastive and compute_contrastive and self.training:
+            # Apply data augmentation
+            augmented_weights = self.contrastive_learning.augment_weights(weights)
+            contrastive_loss = self.contrastive_learning.compute_contrastive_loss(augmented_weights)
+        
         # print("predictions shape:", predictions.shape)
         # print("weights shape:", weights.shape)
         # exit()
-        return predictions, weights
+        return predictions, weights, contrastive_loss
 
 
 class DailyDecoder(nn.Module):
@@ -338,13 +496,14 @@ class DailyDecoder(nn.Module):
 
 
 class Hierarchical(nn.Module):
-    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1):
+    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, enable_contrastive=True):
         super(Hierarchical, self).__init__()
         self.cross_attn = nn.MultiheadAttention(embed_dim=input_dim, num_heads=1, batch_first=True)
-        self.encoder = AnnualEncoder(input_dim, annual_hidden_dim, output_dim)
+        self.encoder = AnnualEncoder(input_dim, annual_hidden_dim, output_dim, enable_contrastive=enable_contrastive)
         self.decoder = DailyDecoder(input_dim, daily_hidden_dim, annual_hidden_dim * 2, output_dim)
+        self.enable_contrastive = enable_contrastive
 
-    def forward(self, x_current, historical_inputs, historical_targets=None, training_inner=True):
+    def forward(self, x_current, historical_inputs, historical_targets=None, training_inner=True, compute_contrastive=True):
         # x_current: [B, 365, input_size=15] - current year data
         # historical_inputs: [B, context_len, 365, input_size=15] - historical year data
         # historical_targets: [B, context_len, 365] - historical target Y for self-supervised learning
@@ -357,7 +516,11 @@ class Hierarchical(nn.Module):
         # print("attention weights:", attention_weights)
         # exit()
         # Get annual context, predictions, weights, and attention weights
-        annual_predictions, annual_weights = self.encoder(historical_inputs, historical_targets)
+        if self.enable_contrastive:
+            annual_predictions, annual_weights, contrastive_loss = self.encoder(historical_inputs, historical_targets, compute_contrastive=True)
+        else:
+            annual_predictions, annual_weights, _ = self.encoder(historical_inputs, historical_targets, compute_contrastive=False)
+            contrastive_loss = torch.tensor(0.0, device=x_current.device)
         
         # Get main prediction
         prediction = self.decoder(x_current, annual_weights, attention_weights)
@@ -367,7 +530,7 @@ class Hierarchical(nn.Module):
         if historical_targets is not None and training_inner:
             inner_loss = self._compute_inner_loss(annual_predictions, historical_targets, attention_weights)
         
-        return prediction, inner_loss
+        return prediction, inner_loss, contrastive_loss
     
     def _compute_inner_loss(self, predictions, historical_targets, attention_weights):
         """
@@ -393,31 +556,48 @@ class Hierarchical(nn.Module):
 
 class LearnableHierarchicalWrapper(nn.Module):
     """Wrapper class providing second-order gradient support for nested optimization"""
-    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, inner_loss_weight=1.0):
+    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, inner_loss_weight=1.0, enable_contrastive=True):
         super(LearnableHierarchicalWrapper, self).__init__()
         
-        self.model = Hierarchical(input_dim, annual_hidden_dim, daily_hidden_dim, output_dim)
+        self.model = Hierarchical(input_dim, annual_hidden_dim, daily_hidden_dim, output_dim, enable_contrastive=enable_contrastive)
         self.inner_loss_weight = inner_loss_weight
+        self.enable_contrastive = enable_contrastive
         
-    def forward(self, x_current, historical_inputs, historical_targets=None, enable_second_order=True):
+        # Adaptive weight parameters for contrastive learning
+        if enable_contrastive:
+            self.contrastive_weight = nn.Parameter(torch.tensor(1.0))
+            self.min_contrastive_weight = 0.1
+            self.max_contrastive_weight = 2.0
+        
+    def forward(self, x_current, historical_inputs, historical_targets=None, enable_second_order=True, epoch=0, total_epochs=20):
         """
-        Forward pass with second-order gradient support
+        Forward pass with second-order gradient support and adaptive contrastive learning
         Args:
             x_current: current year input data [B, 365, input_size]
             historical_inputs: historical year input data [B, context_len, 365, input_size]
             historical_targets: historical target Y for self-supervised learning [B, context_len, 365]
             enable_second_order: whether to enable second-order gradients
+            epoch: current training epoch for adaptive weighting
+            total_epochs: total training epochs for adaptive weighting
         """
         if enable_second_order and historical_targets is not None and self.training:
             # Enable second-order gradients for nested optimization (only during training)
-            outputs, inner_loss = self._forward_with_second_order(x_current, historical_inputs, historical_targets)
+            outputs, inner_loss, contrastive_loss = self._forward_with_second_order(x_current, historical_inputs, historical_targets)
         else:
             # Standard forward pass (during evaluation)
-            outputs, inner_loss = self.model(x_current, historical_inputs, historical_targets, training_inner=False)
+            outputs, inner_loss, contrastive_loss = self.model(x_current, historical_inputs, historical_targets, training_inner=False)
         
-        total_loss = inner_loss * self.inner_loss_weight
+        # Compute adaptive contrastive weight
+        if self.enable_contrastive and self.training:
+            adaptive_weight = self._get_adaptive_contrastive_weight(epoch, total_epochs)
+            contrastive_loss_weighted = contrastive_loss * adaptive_weight
+        else:
+            contrastive_loss_weighted = torch.tensor(0.0, device=x_current.device)
         
-        return outputs, total_loss, inner_loss
+        # Total loss with adaptive weighting
+        total_loss = inner_loss * self.inner_loss_weight + contrastive_loss_weighted
+        
+        return outputs, total_loss, inner_loss, contrastive_loss
     
     def _forward_with_second_order(self, x_current, historical_inputs, historical_targets):
         """
@@ -425,8 +605,8 @@ class LearnableHierarchicalWrapper(nn.Module):
         This creates a nested optimization structure where inner model updates
         are computed as gradients of gradients
         """
-        # First forward pass to get initial outputs and inner loss
-        outputs, inner_loss = self.model(x_current, historical_inputs, historical_targets, training_inner=True)
+        # First forward pass to get initial outputs, inner loss, and contrastive loss
+        outputs, inner_loss, contrastive_loss = self.model(x_current, historical_inputs, historical_targets, training_inner=True, compute_contrastive=True)
         
         # Compute gradients of inner loss w.r.t. inner model parameters
         # This creates the "gradient of gradient" effect for second-order optimization
@@ -441,8 +621,8 @@ class LearnableHierarchicalWrapper(nn.Module):
         except RuntimeError as e:
             if "does not require grad" in str(e):
                 # If gradients are not available, fall back to standard forward pass
-                outputs, inner_loss = self.model(x_current, historical_inputs, historical_targets, training_inner=False)
-                return outputs, inner_loss
+                outputs, inner_loss, contrastive_loss = self.model(x_current, historical_inputs, historical_targets, training_inner=False, compute_contrastive=False)
+                return outputs, inner_loss, contrastive_loss
             else:
                 raise e
         
@@ -451,11 +631,29 @@ class LearnableHierarchicalWrapper(nn.Module):
         # The inner_grads are computed with create_graph=True, which means
         # the outer loss can backpropagate through these gradients
         
-        # Return the outputs and inner loss for the outer optimization
+        # Return the outputs, inner loss, and contrastive loss for the outer optimization
         # The second-order gradients will be automatically computed when
         # the outer loss is backpropagated
-        return outputs, inner_loss
+        return outputs, inner_loss, contrastive_loss
+    
+    def _get_adaptive_contrastive_weight(self, epoch, total_epochs):
+        """
+        Get adaptive weight for contrastive loss
+        Early training: higher weight (focus on learning pure representations)
+        Later training: lower weight (focus on prediction accuracy)
+        """
+        if total_epochs == 0:
+            return self.max_contrastive_weight
+        
+        # Linear decay from max_weight to min_weight
+        progress = epoch / total_epochs
+        weight = self.max_contrastive_weight - (self.max_contrastive_weight - self.min_contrastive_weight) * progress
+        
+        # Apply sigmoid for smoother transition
+        weight = self.min_contrastive_weight + (self.max_contrastive_weight - self.min_contrastive_weight) * (1 - torch.sigmoid(torch.tensor(progress * 4 - 2)))
+        
+        return weight.item()
     
     def predict(self, x_current, historical_inputs):
         """Only perform prediction without training inner model"""
-        return self.model(x_current, historical_inputs, training_inner=False)[0]
+        return self.model(x_current, historical_inputs, training_inner=False, compute_contrastive=False)[0]
