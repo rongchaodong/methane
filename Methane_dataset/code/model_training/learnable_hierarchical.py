@@ -179,6 +179,9 @@ class HierarchicalTemporalDataset(Dataset):
 
         self.data_lengths = [np.load(self.input_files[year], mmap_mode='r').shape[0] for year in self.target_years]
         self.cumsum_lengths = np.cumsum([0] + self.data_lengths)
+        
+        # Calculate the maximum number of locations across all years
+        self.max_locations = max([np.load(self.input_files[year], mmap_mode='r').shape[0] for year in self.all_available_years if year in self.input_files])
 
     def _precompute_historical_data(self):
         """Precompute all year data to improve training efficiency"""
@@ -200,6 +203,9 @@ class HierarchicalTemporalDataset(Dataset):
 
     def __len__(self):
         return self.cumsum_lengths[-1]
+    
+    def __location_length__(self):
+        return self.max_locations
 
     def __getitem__(self, idx):
         year_list_idx = np.searchsorted(self.cumsum_lengths, idx, side="right") - 1
@@ -242,7 +248,8 @@ class HierarchicalTemporalDataset(Dataset):
             x_current.to(config.device),
             historical_inputs.to(config.device),
             y_target.to(config.device),
-            historical_targets.to(config.device)
+            historical_targets.to(config.device),
+            torch.tensor(file_idx, dtype=torch.long).to(config.device)
         )
 
 class HierarchicalSpatialDataset(Dataset):
@@ -273,6 +280,9 @@ class HierarchicalSpatialDataset(Dataset):
 
         self.data_lengths = [np.load(self.input_files[key], mmap_mode='r').shape[0] for key in self.input_files.keys()]
         self.cumsum_lengths = np.cumsum([0] + self.data_lengths)
+        
+        # Calculate the maximum number of locations across all years and folds
+        self.max_locations = max([np.load(self.input_files[key], mmap_mode='r').shape[0] for key in self.input_files.keys()])
 
     def _precompute_historical_data(self):
         """Precompute all historical data"""
@@ -293,6 +303,9 @@ class HierarchicalSpatialDataset(Dataset):
 
     def __len__(self):
         return self.cumsum_lengths[-1]
+
+    def __location_length__(self):
+        return self.max_locations
 
     def __getitem__(self, idx):
         folded_idx = np.searchsorted(self.cumsum_lengths, idx, side="right") - 1
@@ -340,7 +353,8 @@ class HierarchicalSpatialDataset(Dataset):
             x_current.to(config.device),
             historical_inputs.to(config.device),
             y_target.to(config.device),
-            historical_targets.to(config.device)
+            historical_targets.to(config.device),
+            torch.tensor(file_idx, dtype=torch.long).to(config.device)
         )
 
 # class AnnualEncoder(nn.Module):
@@ -354,15 +368,22 @@ class HierarchicalSpatialDataset(Dataset):
 #         return h_n.squeeze(0)
 
 class AnnualEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim=1, num_layers=1, enable_contrastive=True):
+    def __init__(self, input_dim, hidden_dim, output_dim=1, num_layers=1, enable_contrastive=True, dataset=None):
         super().__init__()
         self.gru = nn.GRU(input_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=True)
         self.attn = nn.Linear(hidden_dim * 2, 1)
         self.output_projection = nn.Linear(hidden_dim * 2, output_dim)
         
-        # Use separate output projections for each each location, that means each location has multiple years information, which means the larger the context years, the more powerful and more precise location information
+        # Use separate output projections for each location
+        # Get the actual number of locations from the dataset
+        if dataset is not None and hasattr(dataset, '__location_length__'):
+            self.max_locations = dataset.__location_length__()
+        else:
+            print("Warning: No dataset provided")
+            exit()
+        
         self.output_projections = nn.ModuleList([
-            nn.Linear(hidden_dim * 2, output_dim) for _ in range(config.batch_size)  # Support up to 10 years
+            nn.Linear(hidden_dim * 2, output_dim) for _ in range(self.max_locations)
         ])
         
         # Contrastive learning module
@@ -375,7 +396,7 @@ class AnnualEncoder(nn.Module):
                 noise_std=0.05   # Increased noise for stronger augmentation
             )
 
-    def forward(self, historical_inputs, historical_targets=None, compute_contrastive=True):  # [B, context_len, seq_len, input_size]
+    def forward(self, historical_inputs, file_idx, historical_targets=None, compute_contrastive=True):  # [B, context_len, seq_len, input_size]
         batch_size, context_len, seq_len, input_size = historical_inputs.shape
         
         # Process each historical year through GRU
@@ -386,24 +407,21 @@ class AnnualEncoder(nn.Module):
         gru_out = gru_out.view(batch_size, context_len, seq_len, -1)  # [B, context_len, 2H]
         
         
-        # Generate predictions and weights for each year
+        # Generate predictions and weights for each location using file_idx
         predictions = []
         weights = []
         
         for loc in range(batch_size):
-            # print(batch_size, context_len, seq_len, input_size)
-            # Use year-specific output projection
-            loc_predictions = self.output_projections[loc](gru_out[loc, :, :, :])  # [context_len, seq_len, output_dim]
-            # print("loc_predictions shape:", loc_predictions.shape)
+            # Use location-specific output projection based on file_idx
+            location_idx = file_idx[loc].item()  # Get the actual location index
+            
+            loc_predictions = self.output_projections[location_idx](gru_out[loc, :, :, :])  # [context_len, seq_len, output_dim]
             predictions.append(loc_predictions)
             
-            # Get the weights from year-specific projection and expand to batch dimension
-            year_weights = self.output_projections[loc].weight  # [output_dim, 2H]
-            # print("year_weights shape:", year_weights.shape)
-            year_weights_expanded = year_weights.unsqueeze(0).expand(context_len, -1, -1) # [context_len, output_dim, 2H]
-            weights.append(year_weights_expanded)
-            # print("year_weights_expanded shape:", year_weights_expanded.shape)
-            # exit()
+            # Get the weights from location-specific projection and expand to batch dimension
+            location_weights = self.output_projections[location_idx].weight  # [output_dim, 2H]
+            location_weights_expanded = location_weights.unsqueeze(0).expand(context_len, -1, -1) # [context_len, output_dim, 2H]
+            weights.append(location_weights_expanded)
         
         # Stack predictions and weights
         predictions = torch.stack(predictions, dim=0)  # [B, context_len, seq_len, output_dim]
@@ -496,16 +514,17 @@ class DailyDecoder(nn.Module):
 
 
 class Hierarchical(nn.Module):
-    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, enable_contrastive=True):
+    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, enable_contrastive=True, dataset=None):
         super(Hierarchical, self).__init__()
         self.cross_attn = nn.MultiheadAttention(embed_dim=input_dim, num_heads=1, batch_first=True)
-        self.encoder = AnnualEncoder(input_dim, annual_hidden_dim, output_dim, enable_contrastive=enable_contrastive)
+        self.encoder = AnnualEncoder(input_dim, annual_hidden_dim, output_dim, enable_contrastive=enable_contrastive, dataset=dataset)
         self.decoder = DailyDecoder(input_dim, daily_hidden_dim, annual_hidden_dim * 2, output_dim)
         self.enable_contrastive = enable_contrastive
 
-    def forward(self, x_current, historical_inputs, historical_targets=None, training_inner=True, compute_contrastive=True):
+    def forward(self, x_current, historical_inputs, file_idx, historical_targets=None, training_inner=True, compute_contrastive=True):
         # x_current: [B, 365, input_size=15] - current year data
         # historical_inputs: [B, context_len, 365, input_size=15] - historical year data
+        # file_idx: [B] - location indices for each sample in the batch
         # historical_targets: [B, context_len, 365] - historical target Y for self-supervised learning
         
         attention_weights = self.cross_attn(
@@ -517,9 +536,9 @@ class Hierarchical(nn.Module):
         # exit()
         # Get annual context, predictions, weights, and attention weights
         if self.enable_contrastive:
-            annual_predictions, annual_weights, contrastive_loss = self.encoder(historical_inputs, historical_targets, compute_contrastive=True)
+            annual_predictions, annual_weights, contrastive_loss = self.encoder(historical_inputs, file_idx, historical_targets, compute_contrastive=True)
         else:
-            annual_predictions, annual_weights, _ = self.encoder(historical_inputs, historical_targets, compute_contrastive=False)
+            annual_predictions, annual_weights, _ = self.encoder(historical_inputs, file_idx, historical_targets, compute_contrastive=False)
             contrastive_loss = torch.tensor(0.0, device=x_current.device)
         
         # Get main prediction
@@ -556,10 +575,10 @@ class Hierarchical(nn.Module):
 
 class LearnableHierarchicalWrapper(nn.Module):
     """Wrapper class providing second-order gradient support for nested optimization"""
-    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, inner_loss_weight=1.0, enable_contrastive=True):
+    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, inner_loss_weight=1.0, enable_contrastive=True, dataset=None):
         super(LearnableHierarchicalWrapper, self).__init__()
         
-        self.model = Hierarchical(input_dim, annual_hidden_dim, daily_hidden_dim, output_dim, enable_contrastive=enable_contrastive)
+        self.model = Hierarchical(input_dim, annual_hidden_dim, daily_hidden_dim, output_dim, enable_contrastive=enable_contrastive, dataset=dataset)
         self.inner_loss_weight = inner_loss_weight
         self.enable_contrastive = enable_contrastive
         
@@ -569,12 +588,13 @@ class LearnableHierarchicalWrapper(nn.Module):
             self.min_contrastive_weight = 0.1
             self.max_contrastive_weight = 2.0
         
-    def forward(self, x_current, historical_inputs, historical_targets=None, enable_second_order=True, epoch=0, total_epochs=20):
+    def forward(self, x_current, historical_inputs, file_idx, historical_targets=None, enable_second_order=True, epoch=0, total_epochs=20):
         """
         Forward pass with second-order gradient support and adaptive contrastive learning
         Args:
             x_current: current year input data [B, 365, input_size]
             historical_inputs: historical year input data [B, context_len, 365, input_size]
+            file_idx: location indices for each sample in the batch [B]
             historical_targets: historical target Y for self-supervised learning [B, context_len, 365]
             enable_second_order: whether to enable second-order gradients
             epoch: current training epoch for adaptive weighting
@@ -582,10 +602,10 @@ class LearnableHierarchicalWrapper(nn.Module):
         """
         if enable_second_order and historical_targets is not None and self.training:
             # Enable second-order gradients for nested optimization (only during training)
-            outputs, inner_loss, contrastive_loss = self._forward_with_second_order(x_current, historical_inputs, historical_targets)
+            outputs, inner_loss, contrastive_loss = self._forward_with_second_order(x_current, historical_inputs, file_idx, historical_targets)
         else:
             # Standard forward pass (during evaluation)
-            outputs, inner_loss, contrastive_loss = self.model(x_current, historical_inputs, historical_targets, training_inner=False)
+            outputs, inner_loss, contrastive_loss = self.model(x_current, historical_inputs, file_idx, historical_targets, training_inner=False)
         
         # Compute adaptive contrastive weight
         if self.enable_contrastive and self.training:
@@ -599,14 +619,14 @@ class LearnableHierarchicalWrapper(nn.Module):
         
         return outputs, total_loss, inner_loss, contrastive_loss
     
-    def _forward_with_second_order(self, x_current, historical_inputs, historical_targets):
+    def _forward_with_second_order(self, x_current, historical_inputs, file_idx, historical_targets):
         """
         Forward pass with second-order gradient computation
         This creates a nested optimization structure where inner model updates
         are computed as gradients of gradients
         """
         # First forward pass to get initial outputs, inner loss, and contrastive loss
-        outputs, inner_loss, contrastive_loss = self.model(x_current, historical_inputs, historical_targets, training_inner=True, compute_contrastive=True)
+        outputs, inner_loss, contrastive_loss = self.model(x_current, historical_inputs, file_idx, historical_targets, training_inner=True, compute_contrastive=True)
         
         # Compute gradients of inner loss w.r.t. inner model parameters
         # This creates the "gradient of gradient" effect for second-order optimization
@@ -621,7 +641,7 @@ class LearnableHierarchicalWrapper(nn.Module):
         except RuntimeError as e:
             if "does not require grad" in str(e):
                 # If gradients are not available, fall back to standard forward pass
-                outputs, inner_loss, contrastive_loss = self.model(x_current, historical_inputs, historical_targets, training_inner=False, compute_contrastive=False)
+                outputs, inner_loss, contrastive_loss = self.model(x_current, historical_inputs, file_idx, historical_targets, training_inner=False, compute_contrastive=False)
                 return outputs, inner_loss, contrastive_loss
             else:
                 raise e
@@ -654,6 +674,6 @@ class LearnableHierarchicalWrapper(nn.Module):
         
         return weight.item()
     
-    def predict(self, x_current, historical_inputs):
+    def predict(self, x_current, historical_inputs, file_idx):
         """Only perform prediction without training inner model"""
-        return self.model(x_current, historical_inputs, training_inner=False, compute_contrastive=False)[0]
+        return self.model(x_current, historical_inputs, file_idx, training_inner=False, compute_contrastive=False)[0]
