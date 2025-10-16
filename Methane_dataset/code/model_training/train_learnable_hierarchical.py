@@ -23,20 +23,22 @@ parser.add_argument("--daily_hidden_size", type=int, default=8, help="Hidden siz
 parser.add_argument("--inner_loss_weight", type=float, default=1.0, help="Weight for inner model loss")
 parser.add_argument("--context_years", type=int, default=4, help="Number of context years for hierarchical model")
 parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
+parser.add_argument("--pretrained_model", action="store_true", help="Use pretrained model for fine-tuning")
+parser.add_argument("--fine_tune_epochs", type=int, default=100, help="Number of epochs for fine-tuning on FLUXNET")
 args = parser.parse_args()
 
 config.num_context_years = args.context_years
 config.batch_size = args.batch_size
 # Setup logging
 logging.basicConfig(
-    filename=f"log/learnable_h_loc_{args.data_type}_{args.type}.log",
+    filename=f"log/learnable_h_loc_{args.data_type}_{args.type}.log" if args.simulated else f"log/base_obs_learnable_h_loc_{args.type}.log",
     filemode="a",
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger()
 
-# Create model
+enable_contrastive = args.simulated  # True for simulated, False for FLUXNET
 model = LearnableHierarchicalWrapper(
     input_dim=config.input_size,  # 15 features
     annual_hidden_dim=args.annual_hidden_size,
@@ -46,14 +48,30 @@ model = LearnableHierarchicalWrapper(
     enable_contrastive=True
 ).to(config.device)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
+# Load pretrained model
+if args.pretrained_model:
+    path = f'../model_save/hierarchical/base_model-8.pth'
+    logger.info(f"Loading pretrained model from {path}")
+    try:
+        pretrained_state = torch.load(path, map_location=config.device, weights_only=True)
+        model.load_state_dict(pretrained_state)
+    except Exception as e:
+        print(f"Failed to load pretrained model: {e}")
+        exit(1)
 
-def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test_dataloader: DataLoader):
+optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=100)
+
+def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test_dataloader: DataLoader, use_fluxnet=False):
     patience = 10 if args.simulated else 100
     min_delta = 1e-4 if args.simulated else 1e-5
     wait = 0
     r2_max = -10.0
+    
+    # For FLUXNET fine-tuning, use fewer epochs and different patience
+    # if use_fluxnet:
+    #     epochs = min(epochs, args.fine_tune_epochs)
+    #     patience = 5  # Early stopping for fine-tuning
     
     for epoch in range(epochs):
         logger.info(f'Epoch {epoch}: Training start.')
@@ -67,11 +85,25 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
                 continue
             
             # Forward pass
-            predictions, total_loss, inner_loss, contrastive_loss = model(
-                batch_x_current, 
-                batch_historical_inputs, 
-                batch_historical_targets
-            )
+            if use_fluxnet:
+                # For FLUXNET, disable historical learning and contrastive learning
+                predictions, total_loss, inner_loss, contrastive_loss = model(
+                    batch_x_current, 
+                    batch_historical_inputs, 
+                    batch_historical_targets,
+                    enable_second_order=False  # Disable second-order gradients
+                )
+                # Disable inner loss and contrastive loss for FLUXNET
+                total_loss = torch.tensor(0.0, device=batch_x_current.device)
+                inner_loss = torch.tensor(0.0, device=batch_x_current.device)
+                contrastive_loss = torch.tensor(0.0, device=batch_x_current.device)
+            else:
+                # Standard training for simulated data
+                predictions, total_loss, inner_loss, contrastive_loss = model(
+                    batch_x_current, 
+                    batch_historical_inputs, 
+                    batch_historical_targets
+                )
             
             # Compute main task loss
             main_loss = criterion(predictions, batch_y)
@@ -98,11 +130,21 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
         
         with torch.no_grad():
             for batch_x_current, batch_historical_inputs, batch_y, batch_historical_targets in test_dataloader:
-                predictions, _, _, _ = model(
-                    batch_x_current, 
-                    batch_historical_inputs, 
-                    batch_historical_targets
-                )
+                if use_fluxnet:
+                    # For FLUXNET evaluation, disable historical learning
+                    predictions, _, _, _ = model(
+                        batch_x_current, 
+                        batch_historical_inputs, 
+                        batch_historical_targets,
+                        enable_second_order=False
+                    )
+                else:
+                    # Standard evaluation for simulated data
+                    predictions, _, _, _ = model(
+                        batch_x_current, 
+                        batch_historical_inputs, 
+                        batch_historical_targets
+                    )
                 all_predictions.append(predictions.cpu().numpy().reshape(-1))
                 all_targets.append(batch_y.cpu().numpy().reshape(-1))
         
@@ -131,6 +173,8 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
                 torch.save(record_param, f'../model_save/hierarchical/base_model-{args.context_years}.pth')
                 logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
             else:
+                import time
+                time.sleep(1)
                 torch.save(record_param, f'../model_save/hierarchical/base_obs.pth')
                 logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
         else:
@@ -169,7 +213,7 @@ def main():
             else:
                 test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
 
-            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader)
+            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader, use_fluxnet=False)
             
         else:  # spatial
             years = range(1979, 2019)
@@ -182,7 +226,7 @@ def main():
             test_dataset = HierarchicalSpatialDataset(years, config, years, test_folds)
             test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
             
-            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader)
+            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader, use_fluxnet=False)
     
     else:  # FLUXNET data
         if args.type == "temporal":
@@ -198,7 +242,7 @@ def main():
             test_x = (test_x - mean) / std
             train_x = (train_x - mean) / std
             
-            # Create simplified dataset (FLUXNET has no multi-year historical data, use current data as history)
+            # Create simplified dataset for FLUXNET (no historical data needed)
             class FLUXNETHierarchicalDataset(Dataset):
                 def __init__(self, x, y, config):
                     self.x = x
@@ -209,10 +253,11 @@ def main():
                     return len(self.y)
                 
                 def __getitem__(self, idx):
-                    # Use current data as historical data (simplified processing)
+                    # For FLUXNET, we don't use historical data, just current data
                     x_current = self.x[idx]  # (365, 15) - all features
-                    historical_inputs = self.x[idx].unsqueeze(0).repeat(config.num_context_years, 1, 1)  # (num_context_years, 365, 15)
-                    historical_targets = self.y[idx].unsqueeze(0).repeat(config.num_context_years, 1)  # (num_context_years, 365)
+                    # Create dummy historical inputs (not used in FLUXNET training)
+                    historical_inputs = torch.zeros(config.num_context_years, 365, 15, device=config.device)
+                    historical_targets = torch.zeros(config.num_context_years, 365, device=config.device)
                     
                     return x_current, historical_inputs, self.y[idx], historical_targets
             
@@ -222,7 +267,7 @@ def main():
             train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True)
             test_dataloader = DataLoader(test_dataset, batch_size=4, shuffle=False)
             
-            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader)
+            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader, use_fluxnet=True)
         
         else:  # spatial FLUXNET
             # Similar spatial data processing
@@ -253,7 +298,7 @@ def main():
             train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True)
             test_dataloader = DataLoader(test_dataset, batch_size=4, shuffle=False)
             
-            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader)
+            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader, use_fluxnet=True)
 
 if __name__ == "__main__":
     main()
