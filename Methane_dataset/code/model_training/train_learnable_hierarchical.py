@@ -36,20 +36,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-# Create model
-model = LearnableHierarchicalWrapper(
-    input_dim=config.input_size,  # 15 features
-    annual_hidden_dim=args.annual_hidden_size,
-    daily_hidden_dim=args.daily_hidden_size,
-    output_dim=config.output_size,
-    inner_loss_weight=args.inner_loss_weight,
-    enable_contrastive=True
-).to(config.device)
+# Create model - will be initialized with dataset later
+model = None
+optimizer = None
+scheduler = None
 
-optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
-
-def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test_dataloader: DataLoader):
+def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test_dataloader: DataLoader, model, optimizer, scheduler):
     patience = 10 if args.simulated else 100
     min_delta = 1e-4 if args.simulated else 1e-5
     wait = 0
@@ -62,7 +54,7 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
         running_contrastive_loss = 0.0
         model.train()
         
-        for batch_x_current, batch_historical_inputs, batch_y, batch_historical_targets in train_dataloader:
+        for batch_x_current, batch_historical_inputs, batch_y, batch_historical_targets, batch_file_idx in train_dataloader:
             if torch.isnan(batch_x_current).any():
                 continue
             
@@ -70,6 +62,7 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
             predictions, total_loss, inner_loss, contrastive_loss = model(
                 batch_x_current, 
                 batch_historical_inputs, 
+                batch_file_idx,
                 batch_historical_targets
             )
             
@@ -97,10 +90,11 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
         all_targets = []
         
         with torch.no_grad():
-            for batch_x_current, batch_historical_inputs, batch_y, batch_historical_targets in test_dataloader:
+            for batch_x_current, batch_historical_inputs, batch_y, batch_historical_targets, batch_file_idx in test_dataloader:
                 predictions, _, _, _ = model(
                     batch_x_current, 
                     batch_historical_inputs, 
+                    batch_file_idx,
                     batch_historical_targets
                 )
                 all_predictions.append(predictions.cpu().numpy().reshape(-1))
@@ -144,6 +138,8 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
     return best_nrmse, best_r2
 
 def main():
+    global model, optimizer, scheduler
+    
     if args.simulated:
         if args.type == "temporal":
             logger.info(f'Training learnable hierarchical model with {config.num_context_years} context years')
@@ -169,7 +165,21 @@ def main():
             else:
                 test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
 
-            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader)
+            # Create model with the actual dataset
+            model = LearnableHierarchicalWrapper(
+                input_dim=config.input_size,  # 15 features
+                annual_hidden_dim=args.annual_hidden_size,
+                daily_hidden_dim=args.daily_hidden_size,
+                output_dim=config.output_size,
+                inner_loss_weight=args.inner_loss_weight,
+                enable_contrastive=True,
+                dataset=train_dataset
+            ).to(config.device)
+            
+            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
+
+            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader, model, optimizer, scheduler)
             
         else:  # spatial
             years = range(1979, 2019)
@@ -182,7 +192,21 @@ def main():
             test_dataset = HierarchicalSpatialDataset(years, config, years, test_folds)
             test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
             
-            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader)
+            # Create model with the actual dataset
+            model = LearnableHierarchicalWrapper(
+                input_dim=config.input_size,  # 15 features
+                annual_hidden_dim=args.annual_hidden_size,
+                daily_hidden_dim=args.daily_hidden_size,
+                output_dim=config.output_size,
+                inner_loss_weight=args.inner_loss_weight,
+                enable_contrastive=True,
+                dataset=train_dataset
+            ).to(config.device)
+            
+            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
+            
+            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader, model, optimizer, scheduler)
     
     else:  # FLUXNET data
         if args.type == "temporal":
@@ -204,9 +228,14 @@ def main():
                     self.x = x
                     self.y = y
                     self.config = config
+                    # For FLUXNET, the number of locations is the number of samples
+                    self.max_locations = len(self.y)
                 
                 def __len__(self):
                     return len(self.y)
+                
+                def __location_length__(self):
+                    return self.max_locations
                 
                 def __getitem__(self, idx):
                     # Use current data as historical data (simplified processing)
@@ -214,7 +243,7 @@ def main():
                     historical_inputs = self.x[idx].unsqueeze(0).repeat(config.num_context_years, 1, 1)  # (num_context_years, 365, 15)
                     historical_targets = self.y[idx].unsqueeze(0).repeat(config.num_context_years, 1)  # (num_context_years, 365)
                     
-                    return x_current, historical_inputs, self.y[idx], historical_targets
+                    return x_current, historical_inputs, self.y[idx], historical_targets, torch.tensor(idx, dtype=torch.long)
             
             train_dataset = FLUXNETHierarchicalDataset(train_x.to(config.device), train_y.to(config.device), config)
             test_dataset = FLUXNETHierarchicalDataset(test_x.to(config.device), test_y.to(config.device), config)
@@ -222,7 +251,21 @@ def main():
             train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True)
             test_dataloader = DataLoader(test_dataset, batch_size=4, shuffle=False)
             
-            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader)
+            # Create model with the actual dataset
+            model = LearnableHierarchicalWrapper(
+                input_dim=config.input_size,  # 15 features
+                annual_hidden_dim=args.annual_hidden_size,
+                daily_hidden_dim=args.daily_hidden_size,
+                output_dim=config.output_size,
+                inner_loss_weight=args.inner_loss_weight,
+                enable_contrastive=True,
+                dataset=train_dataset
+            ).to(config.device)
+            
+            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
+            
+            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader, model, optimizer, scheduler)
         
         else:  # spatial FLUXNET
             # Similar spatial data processing
@@ -253,7 +296,21 @@ def main():
             train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True)
             test_dataloader = DataLoader(test_dataset, batch_size=4, shuffle=False)
             
-            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader)
+            # Create model with the actual dataset
+            model = LearnableHierarchicalWrapper(
+                input_dim=config.input_size,  # 15 features
+                annual_hidden_dim=args.annual_hidden_size,
+                daily_hidden_dim=args.daily_hidden_size,
+                output_dim=config.output_size,
+                inner_loss_weight=args.inner_loss_weight,
+                enable_contrastive=True,
+                dataset=train_dataset
+            ).to(config.device)
+            
+            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
+            
+            train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader, model, optimizer, scheduler)
 
 if __name__ == "__main__":
     main()
