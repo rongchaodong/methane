@@ -414,7 +414,7 @@ class AnnualEncoder(nn.Module):
         for loc in range(batch_size):
             # Use location-specific output projection based on file_idx
             location_idx = file_idx[loc].item()  # Get the actual location index
-            
+            # print("Using location index:", location_idx)
             loc_predictions = self.output_projections[location_idx](gru_out[loc, :, :, :])  # [context_len, seq_len, output_dim]
             predictions.append(loc_predictions)
             

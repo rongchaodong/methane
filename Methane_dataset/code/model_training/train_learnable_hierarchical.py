@@ -53,7 +53,8 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
     # if use_fluxnet:
     #     epochs = min(epochs, args.fine_tune_epochs)
     #     patience = 5  # Early stopping for fine-tuning
-    
+    logger.info(f"model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+
     for epoch in range(epochs):
         logger.info(f'Epoch {epoch}: Training start.')
         running_loss = 0.0
@@ -159,6 +160,7 @@ def main():
             train_dataset = HierarchicalTemporalDataset(
                 train_years, config, all_years, args.data_type
             )
+            logger.info(f"training with {train_dataset.__location_length__()} locations")
 
             if args.data_type == "1percent":
                 train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True)
