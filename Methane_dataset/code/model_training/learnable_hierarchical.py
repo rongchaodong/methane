@@ -8,6 +8,45 @@ from config import Config
 
 config = Config()
 
+def save_location_weights(model, save_path):
+    location_weights = {}
+    
+    for i, projection in enumerate(model.model.encoder.output_projections):
+        location_weights[f'location_{i}'] = {
+            'weight': projection.weight.data.clone(),
+            'bias': projection.bias.data.clone() if projection.bias is not None else None
+        }
+    
+    torch.save(location_weights, save_path)
+    print(f"Saved location weights to {save_path}")
+
+def load_pretrained_model_with_location_matching(pretrained_model_path, pretrained_location_weights_path, fluxnet_model):
+    pretrained_state = torch.load(pretrained_model_path, map_location='cpu')
+    current_state = fluxnet_model.state_dict()
+    
+    for key, value in pretrained_state.items():
+        if key in current_state:
+            # load all other possible weights, skip output_projections
+            if 'output_projections' in key:
+                print(f"Skipping location-specific weight: {key}")
+                continue
+            
+            if current_state[key].shape == value.shape:
+                current_state[key] = value
+                print(f"Loaded: {key}")
+            else:
+                print(f"Shape mismatch for {key}: {current_state[key].shape} vs {value.shape}")
+    
+    fluxnet_model.load_state_dict(current_state)
+    
+    pretrained_location_weights = torch.load(pretrained_location_weights_path, map_location='cpu')
+    
+    fluxnet_model.model.encoder.pretrained_location_weights = pretrained_location_weights
+    fluxnet_model.model.encoder.use_pretrained_weights = True
+    
+    print("Successfully loaded pretrained model with location weight matching capability")
+    return fluxnet_model
+
 class ContrastiveLocationLearning(nn.Module):
     """
     Contrastive learning module for location-specific weights
@@ -368,7 +407,7 @@ class HierarchicalSpatialDataset(Dataset):
 #         return h_n.squeeze(0)
 
 class AnnualEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim=1, num_layers=1, enable_contrastive=True, dataset=None):
+    def __init__(self, input_dim, hidden_dim, output_dim=1, num_layers=1, enable_contrastive=True, dataset=None, pretrained_location_weights=None):
         super().__init__()
         self.gru = nn.GRU(input_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=True)
         self.attn = nn.Linear(hidden_dim * 2, 1)
@@ -385,6 +424,10 @@ class AnnualEncoder(nn.Module):
         self.output_projections = nn.ModuleList([
             nn.Linear(hidden_dim * 2, output_dim) for _ in range(self.max_locations)
         ])
+        
+        # Store pretrained location weights for dynamic matching
+        self.pretrained_location_weights = pretrained_location_weights
+        self.use_pretrained_weights = pretrained_location_weights is not None
         
         # Contrastive learning module
         self.enable_contrastive = enable_contrastive
@@ -412,9 +455,24 @@ class AnnualEncoder(nn.Module):
         weights = []
         
         for loc in range(batch_size):
-            # Use location-specific output projection based on file_idx
-            location_idx = file_idx[loc].item()  # Get the actual location index
-            # print("Using location index:", location_idx)
+            # Get the actual location index
+            location_idx = file_idx[loc].item()
+            
+            if self.use_pretrained_weights:
+                current_input = historical_inputs[loc]  # [context_len, seq_len, input_size]
+                
+                best_match_idx = self.find_similar_pretrained_location(current_input, location_idx)
+                
+                pretrained_weights = self.pretrained_location_weights[best_match_idx]
+                
+                original_weight = self.output_projections[location_idx].weight.data.clone()
+                original_bias = self.output_projections[location_idx].bias.data.clone() if self.output_projections[location_idx].bias is not None else None
+                
+                self.output_projections[location_idx].weight.data = pretrained_weights['weight']
+                if pretrained_weights['bias'] is not None and self.output_projections[location_idx].bias is not None:
+                    self.output_projections[location_idx].bias.data = pretrained_weights['bias']
+            
+            # Use location-specific output projection
             loc_predictions = self.output_projections[location_idx](gru_out[loc, :, :, :])  # [context_len, seq_len, output_dim]
             predictions.append(loc_predictions)
             
@@ -422,6 +480,11 @@ class AnnualEncoder(nn.Module):
             location_weights = self.output_projections[location_idx].weight  # [output_dim, 2H]
             location_weights_expanded = location_weights.unsqueeze(0).expand(context_len, -1, -1) # [context_len, output_dim, 2H]
             weights.append(location_weights_expanded)
+            
+            if self.use_pretrained_weights:
+                self.output_projections[location_idx].weight.data = original_weight
+                if original_bias is not None and self.output_projections[location_idx].bias is not None:
+                    self.output_projections[location_idx].bias.data = original_bias
         
         # Stack predictions and weights
         predictions = torch.stack(predictions, dim=0)  # [B, context_len, seq_len, output_dim]
@@ -514,10 +577,10 @@ class DailyDecoder(nn.Module):
 
 
 class Hierarchical(nn.Module):
-    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, enable_contrastive=True, dataset=None):
+    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, enable_contrastive=True, dataset=None, pretrained_location_weights=None):
         super(Hierarchical, self).__init__()
         self.cross_attn = nn.MultiheadAttention(embed_dim=input_dim, num_heads=1, batch_first=True)
-        self.encoder = AnnualEncoder(input_dim, annual_hidden_dim, output_dim, enable_contrastive=enable_contrastive, dataset=dataset)
+        self.encoder = AnnualEncoder(input_dim, annual_hidden_dim, output_dim, enable_contrastive=enable_contrastive, dataset=dataset, pretrained_location_weights=pretrained_location_weights)
         self.decoder = DailyDecoder(input_dim, daily_hidden_dim, annual_hidden_dim * 2, output_dim)
         self.enable_contrastive = enable_contrastive
 
@@ -575,10 +638,10 @@ class Hierarchical(nn.Module):
 
 class LearnableHierarchicalWrapper(nn.Module):
     """Wrapper class providing second-order gradient support for nested optimization"""
-    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, inner_loss_weight=1.0, enable_contrastive=True, dataset=None):
+    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, inner_loss_weight=1.0, enable_contrastive=True, dataset=None, pretrained_location_weights=None):
         super(LearnableHierarchicalWrapper, self).__init__()
         
-        self.model = Hierarchical(input_dim, annual_hidden_dim, daily_hidden_dim, output_dim, enable_contrastive=enable_contrastive, dataset=dataset)
+        self.model = Hierarchical(input_dim, annual_hidden_dim, daily_hidden_dim, output_dim, enable_contrastive=enable_contrastive, dataset=dataset, pretrained_location_weights=pretrained_location_weights)
         self.inner_loss_weight = inner_loss_weight
         self.enable_contrastive = enable_contrastive
         
