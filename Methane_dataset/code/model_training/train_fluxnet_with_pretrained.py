@@ -21,7 +21,7 @@ parser.add_argument("--epoch", type=int, default=100, help="Training epoches")
 parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
 parser.add_argument("--annual_hidden_size", type=int, default=16, help="Hidden size for annual encoder")
 parser.add_argument("--daily_hidden_size", type=int, default=8, help="Hidden size for daily decoder")
-parser.add_argument("--context_years", type=int, default=4, help="Number of context years for hierarchical model")
+parser.add_argument("--context_years", type=int, default=2, help="Number of context years for hierarchical model")
 parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
 args = parser.parse_args()
 
@@ -62,6 +62,7 @@ def load_pretrained_model_with_location_matching(pretrained_model_path, pretrain
                 print(f"Loaded: {key}")
                 if 'historical_weight' in key:
                     print(value)
+                    exit()
             else:
                 print(f"Shape mismatch for {key}: {current_state[key].shape} vs {value.shape}")
     
@@ -218,7 +219,7 @@ def main():
         # Load pretrained model if specified
         if args.pretrained_model:
             logger.info("Loading pretrained model with location weight matching...")
-            pretrained_model_path = f'../model_save/hierarchical/base_model-seq-{args.context_years}.pth'
+            pretrained_model_path = f'../model_save/hierarchical/base_model-1percent-{args.context_years}.pth'
             pretrained_location_weights_path = f'../model_save/hierarchical/location_weights-1percent-{args.context_years}.pth'
             
             try:
@@ -281,8 +282,8 @@ def main():
         # Load pretrained model if specified
         if args.pretrained_model:
             logger.info("Loading pretrained model with location weight matching...")
-            pretrained_model_path = f'../model_save/hierarchical/base_model-{args.context_years}.pth'
-            pretrained_location_weights_path = f'../model_save/hierarchical/location_weights-{args.context_years}.pth'
+            pretrained_model_path = f'../model_save/hierarchical/base_model-1percent-{args.context_years}.pth'
+            pretrained_location_weights_path = f'../model_save/hierarchical/location_weights-1percent-{args.context_years}.pth'
             
             try:
                 model = load_pretrained_model_with_location_matching(

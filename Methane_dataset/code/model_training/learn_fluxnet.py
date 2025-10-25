@@ -131,11 +131,11 @@ class DailyDecoder(nn.Module):
         # initial the last layer into historical enhancement, not sure useful
         # I can also try to use zero as hidden state, but let's try this first
         if historical_enhancement is not None:
-            print("Applying historical enhancement with weight: ", self.historical_weight)
-            print("historical enhancement: ", historical_enhancement)
+            # print("Applying historical enhancement with weight: ", self.historical_weight)
+            # print("historical enhancement: ", historical_enhancement)
             h_states[-1] = (h_states[-1] + self.historical_weight * historical_enhancement) / (1 + torch.abs(self.historical_weight))
-        print("enhanced hidden state: ", h_states[-1])
-        exit()
+        # print("enhanced hidden state: ", h_states[-1])
+        # exit()
 
         lstm_out_enhanced, _ = self.lstm(x_current, (h_states[-1], c_states[-1]))  # [B, seq_len, hidden_size]
 
