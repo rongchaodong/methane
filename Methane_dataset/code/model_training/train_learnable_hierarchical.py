@@ -7,7 +7,7 @@ import math
 import logging
 from sklearn.metrics import mean_squared_error, r2_score
 from config import Config
-from learnable_hierarchical import LearnableHierarchicalWrapper, HierarchicalTemporalDataset, HierarchicalSpatialDataset
+from learnable_hierarchical import LearnableHierarchicalWrapper, HierarchicalTemporalDataset, HierarchicalSpatialDataset, save_location_weights, load_pretrained_model_with_location_matching
 
 config = Config()
 criterion = nn.MSELoss()
@@ -130,13 +130,15 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
             best_r2 = r2
             
             if args.simulated:
-                torch.save(record_param, f'../model_save/hierarchical/base_model-{args.context_years}.pth')
-                logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
+                torch.save(record_param, f'../model_save/hierarchical/base_model-{args.data_type}-{args.context_years}.pth')
+                save_location_weights(model, f'../model_save/hierarchical/location_weights-{args.data_type}-{args.context_years}.pth')
+                logger.info(f"New best model and location weights saved at epoch {epoch} with R2 = {r2:.4f}")
             else:
                 import time
                 time.sleep(1)
                 torch.save(record_param, f'../model_save/hierarchical/base_obs.pth')
-                logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
+                save_location_weights(model, f'../model_save/hierarchical/location_weights_obs.pth')
+                logger.info(f"New best model and location weights saved at epoch {epoch} with R2 = {r2:.4f}")
         else:
             wait += 1
             logger.info(f"No improvement in R2 for {wait} epoch(s)")
