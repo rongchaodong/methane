@@ -5,6 +5,10 @@ import torch.nn.functional as F
 
 config = Config()
 
+# find the exact location in the TEM model
+training_index = [595, 345, 345, 345, 350, 350, 350, 350, 350, 350, 350, 30, 30, 351, 351, 351, 351, 351, 29, 29, 29, 29, 532, 532, 532, 532, -1, -1, -1, -1, -1, 266, 266, -1, -1, 42, 42, 42, 27, 27, -1, -1, 369, 369, 369, 369, 133, 126, 126, 126, 12, 112, 148, 148, 148, 148, 352, 357, 357, 357, 357, 357, 357, 357, 136, 136, 136, 136, -1, -1, -1]
+test_index = [350, 30, 351, 29, 532, -1, 266, -1, 27, -1, 133, 126, 148, 352, 357, 357, 136]
+
 def find_similar_pretrained_location(current_input, current_location_idx, pretrained_location_weights, projection_layer):
     """
     Args:
@@ -86,7 +90,7 @@ class DailyDecoder(nn.Module):
             nn.Linear(daily_hidden_dim * 4, output_dim)
         )
 
-    def forward(self, x_current, file_idx):
+    def forward(self, x_current, file_idx, training):
         # x_current: [B, 365, input_size=15] - all features
         # annual_weights: [B, context_len, output_dim, 2H]
         # attention_weights: [B, context_len]
@@ -103,7 +107,17 @@ class DailyDecoder(nn.Module):
             for loc in range(batch_size):
                 location_idx = file_idx[loc].item()
                 current_loc = x_current[loc:loc+1, :, :]  # [1, 365, input_size]
-                best_match_idx = find_similar_pretrained_location(current_loc, loc, self.pretrained_location_weights, self.similarity_projection)
+                if training: 
+                    if training_index[location_idx] != -1:
+                        best_match_idx = training_index[location_idx]
+                        best_match_idx = f'location_{best_match_idx}'
+                    else: # fallback to using cosine similarity to select
+                        best_match_idx = find_similar_pretrained_location(current_loc, loc, self.pretrained_location_weights, self.similarity_projection)
+                elif test_index[location_idx] != -1:
+                    best_match_idx = test_index[location_idx]
+                    best_match_idx = f'location_{best_match_idx}'
+                else:
+                    best_match_idx = find_similar_pretrained_location(current_loc, loc, self.pretrained_location_weights, self.similarity_projection)
                 pretrained_weights = self.pretrained_location_weights[best_match_idx]
                  # Update the output projection for this location
                 self.output_projections[location_idx].weight.data = pretrained_weights['weight']
@@ -151,12 +165,12 @@ class Hierarchical(nn.Module):
         super(Hierarchical, self).__init__()
         self.decoder = DailyDecoder(input_dim, daily_hidden_dim, annual_hidden_dim * 2, output_dim, dataset=dataset)
 
-    def forward(self, x_current, file_idx):
+    def forward(self, x_current, file_idx, training):
         # x_current: [B, 365, input_size=15] - current year data
         # file_idx: [B] - location indices for each sample in the batch
         
         # Get main prediction
-        prediction = self.decoder(x_current, file_idx) # [B, 365]
+        prediction = self.decoder(x_current, file_idx, training) # [B, 365]
         
         return prediction
     
@@ -169,12 +183,12 @@ class LearnableHierarchicalWrapper(nn.Module):
         self.model = Hierarchical(input_dim, annual_hidden_dim, daily_hidden_dim, output_dim, dataset=dataset)
 
 
-    def forward(self, x_current, file_idx):
+    def forward(self, x_current, file_idx, training):
         """
         Forward pass with second-order gradient support and adaptive contrastive learning
         Args:
             x_current: current year input data [B, 365, input_size]
             file_idx: location indices for each sample in the batch [B]
         """
-        outputs = self.model(x_current, file_idx)  # [B, 365]
+        outputs = self.model(x_current, file_idx, training)  # [B, 365]
         return outputs

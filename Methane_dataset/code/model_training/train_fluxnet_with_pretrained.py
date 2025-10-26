@@ -17,7 +17,7 @@ criterion = nn.MSELoss()
 parser = argparse.ArgumentParser(description="training FLUXNET with pretrained model and location weight matching")
 parser.add_argument("--type", type=str, default="temporal", help="please choose temporal or spatial")
 parser.add_argument("--pretrained_model", action="store_true", help="Use pretrained model for fine-tuning")
-parser.add_argument("--epoch", type=int, default=100, help="Training epoches")
+parser.add_argument("--epoch", type=int, default=200, help="Training epoches")
 parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
 parser.add_argument("--annual_hidden_size", type=int, default=16, help="Hidden size for annual encoder")
 parser.add_argument("--daily_hidden_size", type=int, default=8, help="Hidden size for daily decoder")
@@ -62,7 +62,6 @@ def load_pretrained_model_with_location_matching(pretrained_model_path, pretrain
                 print(f"Loaded: {key}")
                 if 'historical_weight' in key:
                     print(value)
-                    exit()
             else:
                 print(f"Shape mismatch for {key}: {current_state[key].shape} vs {value.shape}")
     
@@ -73,7 +72,7 @@ def load_pretrained_model_with_location_matching(pretrained_model_path, pretrain
     return fluxnet_model
 
 def train_fluxnet_model(epochs: int, train_dataloader: DataLoader, test_dataloader: DataLoader, model, optimizer, scheduler):
-    patience = 10  # Early stopping patience
+    patience = 20  # Early stopping patience
     min_delta = 1e-4
     wait = 0
     r2_max = -10.0
@@ -94,7 +93,8 @@ def train_fluxnet_model(epochs: int, train_dataloader: DataLoader, test_dataload
             # Forward pass
             predictions = model(
                 batch_x_current, 
-                batch_file_idx
+                batch_file_idx,
+                True
             )
             
             # Compute main task loss
@@ -122,7 +122,8 @@ def train_fluxnet_model(epochs: int, train_dataloader: DataLoader, test_dataload
             for batch_x_current, batch_y, batch_file_idx in test_dataloader:
                 predictions = model(
                     batch_x_current, 
-                    batch_file_idx
+                    batch_file_idx,
+                    False
                 )
                 all_predictions.append(predictions.cpu().numpy().reshape(-1))
                 all_targets.append(batch_y.cpu().numpy().reshape(-1))
