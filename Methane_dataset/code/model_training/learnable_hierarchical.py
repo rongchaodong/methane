@@ -5,6 +5,7 @@ from torch.utils.data import Dataset
 import numpy as np
 import math
 from config import Config
+import pickle
 
 config = Config()
 
@@ -357,6 +358,135 @@ class HierarchicalSpatialDataset(Dataset):
             torch.tensor(file_idx, dtype=torch.long).to(config.device)
         )
 
+
+class FluxnetHierarchicalDataset(Dataset):
+    """
+    用于 FLUXNET 数据的分层时间数据集。
+    
+    这个 Dataset 读取一个“以站点为中心”的缓存，该缓存由预处理 notebook 生成。
+    它能智能地为每个 (站点, 年份) 样本查找真实的历史数据。
+    """
+    def __init__(self, config, mode='train'):
+        self.config = config
+        self.mode = mode
+        
+        data_dir = '../../processed_data/FLUXNET-CH4/site_centric/'
+        
+        # 1. 加载预处理好的数据
+        import os
+        with open(os.path.join(data_dir, 'all_data_cache.pkl'), 'rb') as f:
+            self.all_data_cache = pickle.load(f)
+            
+        with open(os.path.join(data_dir, 'site_to_id_map.pkl'), 'rb') as f:
+            self.site_to_id_map = pickle.load(f)
+            
+        if mode == 'train':
+            with open(os.path.join(data_dir, 'train_samples.pkl'), 'rb') as f:
+                self.samples = pickle.load(f)
+        elif mode == 'test':
+            with open(os.path.join(data_dir, 'test_samples.pkl'), 'rb') as f:
+                self.samples = pickle.load(f)
+        else:
+            raise ValueError(f"Mode '{mode}' not recognized. Use 'train' or 'test'.")
+
+        self.mean_vals = np.load('../../data/TEM-MDM/mean_vals.npy')
+        self.std_vals = np.load('../../data/TEM-MDM/std_vals.npy')
+        
+        self.max_locations = len(self.site_to_id_map)
+
+        print(f"Loaded {mode} dataset with {len(self.samples)} samples from {self.max_locations} unique sites.")
+
+    def __len__(self):
+        return len(self.samples)
+    
+    def __location_length__(self):
+        return self.max_locations
+
+    def __getitem__(self, idx):
+        # 1. 获取此样本对应的 站点 和 年份
+        site_name, target_year = self.samples[idx]
+        
+        # 2. 获取唯一的整数 "location_id" (新的 file_idx)
+        # 这将用于 AnnualEncoder 中的 nn.ModuleList
+        location_id = self.site_to_id_map[site_name]
+        
+        # 3. 获取当前年份的数据
+        current_data = self.all_data_cache[site_name][target_year]
+        
+        x_current_raw = current_data['input']
+        x_current = (x_current_raw - self.mean_vals) / self.std_vals
+        # print("x_current:", x_current[150][:9])
+        
+        y_target_raw = current_data['output']
+        y_target = y_target_raw
+        
+        # 转换为 Tensors
+        x_current = torch.tensor(x_current, dtype=torch.float32)
+        y_target = torch.tensor(y_target, dtype=torch.float32)
+
+        historical_inputs = []
+        historical_targets = []
+        
+        # 获取此站点的所有可用数据
+        site_data = self.all_data_cache[site_name]
+        
+        # 找到所有早于目标年份的年份，并按降序排列
+        available_hist_years = sorted(
+            [y for y in site_data.keys() if y < target_year], 
+            reverse=True
+        )
+        
+        for i in range(self.config.num_context_years):
+            if i < len(available_hist_years):
+                # --- 情况1: 找到了真实的历史年份 ---
+                hist_year = available_hist_years[i]
+                hist_data = site_data[hist_year]
+                
+                # 标准化
+                hist_input_raw = hist_data['input']
+                hist_input = (hist_input_raw - self.mean_vals) / self.std_vals
+                # print("current year:", target_year, "hist_year:", hist_year)
+                # print("hist_input: ", hist_input[150][:9])
+                
+                hist_target_raw = hist_data['output']
+                hist_target = hist_target_raw
+                
+                historical_inputs.append(torch.tensor(hist_input, dtype=torch.float32))
+                historical_targets.append(torch.tensor(hist_target, dtype=torch.float32))
+                
+            else:
+                if len(available_hist_years) > 0:
+                    earliest_year = available_hist_years[-1] # 最早的一年
+                    earliest_data = site_data[earliest_year]
+                    
+                    earliest_input_raw = earliest_data['input']
+                    earliest_input = (earliest_input_raw - self.mean_vals) / self.std_vals
+
+                    # print("current year:", target_year, "earliest_year:", earliest_year)
+                    # print("earliest_input: ", earliest_input[150][:9])
+                    
+                    earliest_target_raw = earliest_data['output']
+                    earliest_target = earliest_target_raw
+                    
+                    historical_inputs.append(torch.tensor(earliest_input, dtype=torch.float32))
+                    historical_targets.append(torch.tensor(earliest_target, dtype=torch.float32))
+                else:
+                    # print("Warning: No historical data available for site:", site_name, "year:", target_year)
+                    # print("should not happen if data is prepared correctly.")
+                    historical_inputs.append(x_current)
+                    historical_targets.append(y_target)
+        
+        # exit()
+        historical_inputs = torch.stack(historical_inputs)
+        historical_targets = torch.stack(historical_targets)
+
+        return (
+            x_current.to(self.config.device),
+            historical_inputs.to(self.config.device),
+            y_target.to(self.config.device),
+            historical_targets.to(self.config.device),
+            torch.tensor(location_id, dtype=torch.long).to(self.config.device)
+        )
 # class AnnualEncoder(nn.Module):
 #     def __init__(self, input_dim, hidden_dim, num_layers=1):
 #         super(AnnualEncoder, self).__init__()
