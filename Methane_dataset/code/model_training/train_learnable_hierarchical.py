@@ -7,7 +7,7 @@ import math
 import logging
 from sklearn.metrics import mean_squared_error, r2_score
 from config import Config
-from learnable_hierarchical import LearnableHierarchicalWrapper, HierarchicalTemporalDataset, HierarchicalSpatialDataset
+from learnable_hierarchical import LearnableHierarchicalWrapper, HierarchicalTemporalDataset, HierarchicalSpatialDataset, save_location_weights, load_pretrained_model_with_location_matching
 
 config = Config()
 criterion = nn.MSELoss()
@@ -23,13 +23,15 @@ parser.add_argument("--daily_hidden_size", type=int, default=8, help="Hidden siz
 parser.add_argument("--inner_loss_weight", type=float, default=1.0, help="Weight for inner model loss")
 parser.add_argument("--context_years", type=int, default=4, help="Number of context years for hierarchical model")
 parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
+parser.add_argument("--pretrained_model", action="store_true", help="Use pretrained model for fine-tuning")
+parser.add_argument("--fine_tune_epochs", type=int, default=100, help="Number of epochs for fine-tuning on FLUXNET")
 args = parser.parse_args()
 
 config.num_context_years = args.context_years
 config.batch_size = args.batch_size
 # Setup logging
 logging.basicConfig(
-    filename=f"log/learnable_h_loc_{args.data_type}_{args.type}.log",
+    filename=f"log/learnable_h_loc_{args.data_type}_{args.type}.log" if args.simulated else f"log/base_obs_learnable_h_loc_{args.type}.log",
     filemode="a",
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -47,6 +49,12 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
     wait = 0
     r2_max = -10.0
     
+    # For FLUXNET fine-tuning, use fewer epochs and different patience
+    # if use_fluxnet:
+    #     epochs = min(epochs, args.fine_tune_epochs)
+    #     patience = 5  # Early stopping for fine-tuning
+    logger.info(f"model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+
     for epoch in range(epochs):
         logger.info(f'Epoch {epoch}: Training start.')
         running_loss = 0.0
@@ -122,11 +130,15 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
             best_r2 = r2
             
             if args.simulated:
-                torch.save(record_param, f'../model_save/hierarchical/base_model-{args.context_years}.pth')
-                logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
+                torch.save(record_param, f'../model_save/hierarchical/base_model-{args.data_type}-{args.context_years}.pth')
+                save_location_weights(model, f'../model_save/hierarchical/location_weights-{args.data_type}-{args.context_years}.pth')
+                logger.info(f"New best model and location weights saved at epoch {epoch} with R2 = {r2:.4f}")
             else:
+                import time
+                time.sleep(1)
                 torch.save(record_param, f'../model_save/hierarchical/base_obs.pth')
-                logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
+                save_location_weights(model, f'../model_save/hierarchical/location_weights_obs.pth')
+                logger.info(f"New best model and location weights saved at epoch {epoch} with R2 = {r2:.4f}")
         else:
             wait += 1
             logger.info(f"No improvement in R2 for {wait} epoch(s)")
@@ -150,6 +162,7 @@ def main():
             train_dataset = HierarchicalTemporalDataset(
                 train_years, config, all_years, args.data_type
             )
+            logger.info(f"training with {train_dataset.__location_length__()} locations")
 
             if args.data_type == "1percent":
                 train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True)
@@ -222,7 +235,7 @@ def main():
             test_x = (test_x - mean) / std
             train_x = (train_x - mean) / std
             
-            # Create simplified dataset (FLUXNET has no multi-year historical data, use current data as history)
+            # Create simplified dataset for FLUXNET (no historical data needed)
             class FLUXNETHierarchicalDataset(Dataset):
                 def __init__(self, x, y, config):
                     self.x = x
@@ -238,10 +251,11 @@ def main():
                     return self.max_locations
                 
                 def __getitem__(self, idx):
-                    # Use current data as historical data (simplified processing)
+                    # For FLUXNET, we don't use historical data, just current data
                     x_current = self.x[idx]  # (365, 15) - all features
-                    historical_inputs = self.x[idx].unsqueeze(0).repeat(config.num_context_years, 1, 1)  # (num_context_years, 365, 15)
-                    historical_targets = self.y[idx].unsqueeze(0).repeat(config.num_context_years, 1)  # (num_context_years, 365)
+                    # Create dummy historical inputs (not used in FLUXNET training)
+                    historical_inputs = torch.zeros(config.num_context_years, 365, 15, device=config.device)
+                    historical_targets = torch.zeros(config.num_context_years, 365, device=config.device)
                     
                     return x_current, historical_inputs, self.y[idx], historical_targets, torch.tensor(idx, dtype=torch.long)
             

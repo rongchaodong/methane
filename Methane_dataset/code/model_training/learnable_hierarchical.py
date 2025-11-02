@@ -9,6 +9,45 @@ import pickle
 
 config = Config()
 
+def save_location_weights(model, save_path):
+    location_weights = {}
+    
+    for i, projection in enumerate(model.model.encoder.output_projections):
+        location_weights[f'location_{i}'] = {
+            'weight': projection.weight.data.clone(),
+            'bias': projection.bias.data.clone() if projection.bias is not None else None
+        }
+    
+    torch.save(location_weights, save_path)
+    print(f"Saved location weights to {save_path}")
+
+def load_pretrained_model_with_location_matching(pretrained_model_path, pretrained_location_weights_path, fluxnet_model):
+    pretrained_state = torch.load(pretrained_model_path, map_location='cpu')
+    current_state = fluxnet_model.state_dict()
+    
+    for key, value in pretrained_state.items():
+        if key in current_state:
+            # load all other possible weights, skip output_projections
+            if 'output_projections' in key:
+                print(f"Skipping location-specific weight: {key}")
+                continue
+            
+            if current_state[key].shape == value.shape:
+                current_state[key] = value
+                print(f"Loaded: {key}")
+            else:
+                print(f"Shape mismatch for {key}: {current_state[key].shape} vs {value.shape}")
+    
+    fluxnet_model.load_state_dict(current_state)
+    
+    pretrained_location_weights = torch.load(pretrained_location_weights_path, map_location='cpu')
+    
+    fluxnet_model.model.encoder.pretrained_location_weights = pretrained_location_weights
+    fluxnet_model.model.encoder.use_pretrained_weights = True
+    
+    print("Successfully loaded pretrained model with location weight matching capability")
+    return fluxnet_model
+
 class ContrastiveLocationLearning(nn.Module):
     """
     Contrastive learning module for location-specific weights
@@ -171,36 +210,31 @@ class HierarchicalTemporalDataset(Dataset):
         elif data_source == "sparse":
             self.input_files = {year: f"../../processed_data/TEM-MDM/sparse/temporal/input_{year}.npy" for year in self.all_available_years}
             self.output_files = {year: f"../../processed_data/TEM-MDM/sparse/temporal/output_{year}.npy" for year in self.all_available_years}
-            
-        self.mean_vals = np.load('../../data/TEM-MDM/mean_vals.npy')
-        self.std_vals = np.load('../../data/TEM-MDM/std_vals.npy')
+        elif data_source == "full":
+            self.input_files = {year: f"../../processed_data/TEM-MDM/full/temporal/input_{year}.npy" for year in self.all_available_years}
+            self.output_files = {year: f"../../processed_data/TEM-MDM/full/temporal/output_{year}.npy" for year in self.all_available_years}
 
-        # Precompute all historical data for efficiency
-        self.historical_cache = self._precompute_historical_data()
+        # Use float32 mean/std to avoid float64 temporaries
+        self.mean_vals = np.load('../../data/TEM-MDM/mean_vals.npy').astype(np.float32)
+        self.std_vals = np.load('../../data/TEM-MDM/std_vals.npy').astype(np.float32)
 
-        self.data_lengths = [np.load(self.input_files[year], mmap_mode='r').shape[0] for year in self.target_years]
+        # Build memory-mapped handles (lightweight). Do NOT load full arrays into memory.
+        self.input_memmaps = {year: np.load(path, mmap_mode='r') for year, path in self.input_files.items()}
+        self.output_memmaps = {year: np.load(path, mmap_mode='r') for year, path in self.output_files.items()}
+
+        # historical_cache kept for API compatibility but we don't precompute large arrays
+        self.historical_cache = {}
+
+        self.data_lengths = [self.input_memmaps[year].shape[0] for year in self.target_years]
         self.cumsum_lengths = np.cumsum([0] + self.data_lengths)
         
-        # Calculate the maximum number of locations across all years
-        self.max_locations = max([np.load(self.input_files[year], mmap_mode='r').shape[0] for year in self.all_available_years if year in self.input_files])
+        # Calculate the maximum number of locations across all years (cheap)
+        self.max_locations = max([self.input_memmaps[year].shape[0] for year in self.all_available_years if year in self.input_memmaps])
 
     def _precompute_historical_data(self):
         """Precompute all year data to improve training efficiency"""
-        cache = {}
-        for year in self.all_available_years:
-            if year in self.input_files:
-                input_data = np.load(self.input_files[year], mmap_mode='r')
-                output_data = np.load(self.output_files[year], mmap_mode='r')
-                
-                # Normalize
-                normalized_input = (input_data - self.mean_vals) / self.std_vals
-                normalized_output = output_data / 23
-                
-                cache[year] = {
-                    'input': normalized_input,
-                    'output': normalized_output
-                }
-        return cache
+        # no-op: we use memmaps and normalize per-sample in __getitem__ to avoid large allocations
+        return {}
 
     def __len__(self):
         return self.cumsum_lengths[-1]
@@ -213,45 +247,55 @@ class HierarchicalTemporalDataset(Dataset):
         file_idx = idx - self.cumsum_lengths[year_list_idx]
         actual_year = self.target_years[year_list_idx]
 
-        # Current year data
-        current_data = self.historical_cache[actual_year]
-        x_current = current_data['input'][file_idx]  # (365, 15) - all features
-        y_target = current_data['output'][file_idx]  # (365,)
-        
-        # Collect historical year data
+        # Current year sample read from memmap (small view, no full-copy until astype)
+        inp_mm = self.input_memmaps[actual_year]
+        out_mm = self.output_memmaps[actual_year]
+        x_current = inp_mm[file_idx]   # (365, 15) - all features
+        y_target = out_mm[file_idx]
+         
+         # Collect historical year data
         historical_inputs = []
         historical_targets = []
         
         for i in range(1, self.config.num_context_years + 1):
             historical_year = actual_year - i
-            
-            if historical_year in self.historical_cache:
-                hist_data = self.historical_cache[historical_year]
-                # Ensure index doesn't go out of bounds
-                safe_idx = min(file_idx, hist_data['input'].shape[0] - 1)
-                historical_inputs.append(hist_data['input'][safe_idx])  # (365, 15) - all features
-                historical_targets.append(hist_data['output'][safe_idx])  # (365,)
+             
+            if historical_year in self.input_memmaps:
+                hist_inp_mm = self.input_memmaps[historical_year]
+                hist_out_mm = self.output_memmaps[historical_year]
+                safe_idx = min(file_idx, hist_inp_mm.shape[0] - 1)
+                historical_inputs.append(hist_inp_mm[safe_idx])
+                historical_targets.append(hist_out_mm[safe_idx])
             else:
                 # If historical year doesn't exist, use earliest year data
                 earliest_year = min(self.all_available_years)
-                hist_data = self.historical_cache[earliest_year]
-                safe_idx = min(file_idx, hist_data['input'].shape[0] - 1)
-                historical_inputs.append(hist_data['input'][safe_idx])
-                historical_targets.append(hist_data['output'][safe_idx])
-        
-        # Convert to tensors
+                hist_inp_mm = self.input_memmaps[earliest_year]
+                hist_out_mm = self.output_memmaps[earliest_year]
+                safe_idx = min(file_idx, hist_inp_mm.shape[0] - 1)
+                historical_inputs.append(hist_inp_mm[safe_idx])
+                historical_targets.append(hist_out_mm[safe_idx])
+         
+
+        # Per-sample normalization and conversion to float32 tensors (minimize temporaries)
+        x_current = ((x_current.astype(np.float32) - self.mean_vals) / self.std_vals).astype(np.float32)
+        y_target = (y_target.astype(np.float32) / 23.0).astype(np.float32)
+        historical_inputs = np.stack(historical_inputs, axis=0).astype(np.float32)
+        # normalize each historical input sample
+        historical_inputs = (historical_inputs - self.mean_vals) / self.std_vals
+        historical_targets = np.stack(historical_targets, axis=0).astype(np.float32) / 23.0
+
         x_current = torch.tensor(x_current, dtype=torch.float32)
         y_target = torch.tensor(y_target, dtype=torch.float32)
-        historical_inputs = torch.stack([torch.tensor(h, dtype=torch.float32) for h in historical_inputs])
-        historical_targets = torch.stack([torch.tensor(h, dtype=torch.float32) for h in historical_targets])
-
+        historical_inputs = torch.tensor(historical_inputs, dtype=torch.float32)
+        historical_targets = torch.tensor(historical_targets, dtype=torch.float32)
+ 
         return (
-            x_current.to(config.device),
-            historical_inputs.to(config.device),
-            y_target.to(config.device),
-            historical_targets.to(config.device),
-            torch.tensor(file_idx, dtype=torch.long).to(config.device)
-        )
+             x_current.to(config.device),
+             historical_inputs.to(config.device),
+             y_target.to(config.device),
+             historical_targets.to(config.device),
+             torch.tensor(file_idx, dtype=torch.long).to(config.device)
+         )
 
 class HierarchicalSpatialDataset(Dataset):
     """
@@ -498,7 +542,7 @@ class FluxnetHierarchicalDataset(Dataset):
 #         return h_n.squeeze(0)
 
 class AnnualEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim=1, num_layers=1, enable_contrastive=True, dataset=None):
+    def __init__(self, input_dim, hidden_dim, output_dim=1, num_layers=1, enable_contrastive=True, dataset=None, pretrained_location_weights=None):
         super().__init__()
         self.gru = nn.GRU(input_dim, hidden_dim, num_layers=num_layers, batch_first=True, bidirectional=True)
         self.attn = nn.Linear(hidden_dim * 2, 1)
@@ -515,6 +559,10 @@ class AnnualEncoder(nn.Module):
         self.output_projections = nn.ModuleList([
             nn.Linear(hidden_dim * 2, output_dim) for _ in range(self.max_locations)
         ])
+        
+        # Store pretrained location weights for dynamic matching
+        self.pretrained_location_weights = pretrained_location_weights
+        self.use_pretrained_weights = pretrained_location_weights is not None
         
         # Contrastive learning module
         self.enable_contrastive = enable_contrastive
@@ -542,9 +590,24 @@ class AnnualEncoder(nn.Module):
         weights = []
         
         for loc in range(batch_size):
-            # Use location-specific output projection based on file_idx
-            location_idx = file_idx[loc].item()  # Get the actual location index
+            # Get the actual location index
+            location_idx = file_idx[loc].item()
             
+            if self.use_pretrained_weights:
+                current_input = historical_inputs[loc]  # [context_len, seq_len, input_size]
+                
+                best_match_idx = self.find_similar_pretrained_location(current_input, location_idx)
+                
+                pretrained_weights = self.pretrained_location_weights[best_match_idx]
+                
+                original_weight = self.output_projections[location_idx].weight.data.clone()
+                original_bias = self.output_projections[location_idx].bias.data.clone() if self.output_projections[location_idx].bias is not None else None
+                
+                self.output_projections[location_idx].weight.data = pretrained_weights['weight']
+                if pretrained_weights['bias'] is not None and self.output_projections[location_idx].bias is not None:
+                    self.output_projections[location_idx].bias.data = pretrained_weights['bias']
+            
+            # Use location-specific output projection
             loc_predictions = self.output_projections[location_idx](gru_out[loc, :, :, :])  # [context_len, seq_len, output_dim]
             predictions.append(loc_predictions)
             
@@ -552,6 +615,11 @@ class AnnualEncoder(nn.Module):
             location_weights = self.output_projections[location_idx].weight  # [output_dim, 2H]
             location_weights_expanded = location_weights.unsqueeze(0).expand(context_len, -1, -1) # [context_len, output_dim, 2H]
             weights.append(location_weights_expanded)
+            
+            if self.use_pretrained_weights:
+                self.output_projections[location_idx].weight.data = original_weight
+                if original_bias is not None and self.output_projections[location_idx].bias is not None:
+                    self.output_projections[location_idx].bias.data = original_bias
         
         # Stack predictions and weights
         predictions = torch.stack(predictions, dim=0)  # [B, context_len, seq_len, output_dim]
@@ -644,10 +712,10 @@ class DailyDecoder(nn.Module):
 
 
 class Hierarchical(nn.Module):
-    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, enable_contrastive=True, dataset=None):
+    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, enable_contrastive=True, dataset=None, pretrained_location_weights=None):
         super(Hierarchical, self).__init__()
         self.cross_attn = nn.MultiheadAttention(embed_dim=input_dim, num_heads=1, batch_first=True)
-        self.encoder = AnnualEncoder(input_dim, annual_hidden_dim, output_dim, enable_contrastive=enable_contrastive, dataset=dataset)
+        self.encoder = AnnualEncoder(input_dim, annual_hidden_dim, output_dim, enable_contrastive=enable_contrastive, dataset=dataset, pretrained_location_weights=pretrained_location_weights)
         self.decoder = DailyDecoder(input_dim, daily_hidden_dim, annual_hidden_dim * 2, output_dim)
         self.enable_contrastive = enable_contrastive
 
@@ -705,10 +773,10 @@ class Hierarchical(nn.Module):
 
 class LearnableHierarchicalWrapper(nn.Module):
     """Wrapper class providing second-order gradient support for nested optimization"""
-    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, inner_loss_weight=1.0, enable_contrastive=True, dataset=None):
+    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, inner_loss_weight=1.0, enable_contrastive=True, dataset=None, pretrained_location_weights=None):
         super(LearnableHierarchicalWrapper, self).__init__()
         
-        self.model = Hierarchical(input_dim, annual_hidden_dim, daily_hidden_dim, output_dim, enable_contrastive=enable_contrastive, dataset=dataset)
+        self.model = Hierarchical(input_dim, annual_hidden_dim, daily_hidden_dim, output_dim, enable_contrastive=enable_contrastive, dataset=dataset, pretrained_location_weights=pretrained_location_weights)
         self.inner_loss_weight = inner_loss_weight
         self.enable_contrastive = enable_contrastive
         
