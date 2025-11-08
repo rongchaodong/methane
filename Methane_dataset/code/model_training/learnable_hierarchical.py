@@ -117,10 +117,11 @@ class ContrastiveLocationLearning(nn.Module):
         # Return the first augmented version (you can modify this to return multiple versions)
         return augmented_versions[0]
     
-    def compute_contrastive_loss(self, weights):
+    def compute_contrastive_loss(self, pruned_inputs, weights):
         """
-        Compute InfoNCE contrastive loss for location weights with improved sampling
+        Compute InfoNCE contrastive loss using input similarity to select positive/negative samples
         Args:
+            pruned_inputs: [B, context_len, seq_len, feature_dim] - used to compute similarity for sampling
             weights: [B, context_len, output_dim, weight_dim]
         Returns:
             contrastive_loss: scalar tensor
@@ -139,40 +140,67 @@ class ContrastiveLocationLearning(nn.Module):
         # Normalize for cosine similarity
         projected = F.normalize(projected, dim=-1)
         
-        # Improved contrastive loss computation
+        # Compute input similarity for positive/negative sampling
+        # Average over context_len and seq_len to get location-level representation
+        input_repr = pruned_inputs.mean(dim=(1, 2))  # [B, feature_dim]
+        input_repr = F.normalize(input_repr, dim=-1)  # normalize for cosine similarity
+        
+        # Compute pairwise cosine similarities between locations
+        input_similarities = torch.matmul(input_repr, input_repr.T)  # [B, B]
+        
         total_loss = 0.0
         valid_pairs = 0
         
+        # Number of positive samples: 1/4 of batch size (excluding self)
+        num_positives = max(1, (batch_size - 1) // 4)
+        
         for i in range(batch_size):
-            # Get representations for location i
-            anchor = projected[i]  # [context_len*output_dim, contrastive_dim]
+            # Get similarities for location i with all other locations
+            similarities = input_similarities[i]  # [B]
             
-            # Create positive samples: use augmented versions of the same location
-            # Method 1: Use different time steps as positive samples (but with more diversity)
-            if context_len * output_dim > 2:
-                # Randomly sample positive samples from the same location
-                num_pos = min(3, context_len * output_dim - 1)  # Use up to 3 positive samples
-                pos_indices = torch.randperm(context_len * output_dim - 1)[:num_pos] + 1
-                pos_samples = anchor[pos_indices]  # [num_pos, contrastive_dim]
+            # Exclude self-similarity
+            mask = torch.ones(batch_size, dtype=torch.bool, device=similarities.device)
+            mask[i] = False
+            other_similarities = similarities[mask]  # [B-1]
+            other_indices = torch.arange(batch_size, device=similarities.device)[mask]  # [B-1]
+            
+            if len(other_indices) == 0:
+                continue
+                
+            # Select top similar locations as positives
+            _, top_indices = torch.topk(other_similarities, min(num_positives, len(other_indices)))
+            positive_indices = other_indices[top_indices]
+            
+            # Remaining locations as negatives
+            negative_mask = torch.ones(len(other_indices), dtype=torch.bool, device=similarities.device)
+            negative_mask[top_indices] = False
+            negative_indices = other_indices[negative_mask]
+            
+            # Get anchor representation (use first context*output representation)
+            anchor = projected[i, 0:1]  # [1, contrastive_dim]
+            
+            # Get positive samples (use first context*output representation from each positive location)
+            if len(positive_indices) > 0:
+                pos_samples = projected[positive_indices, 0]  # [num_pos, contrastive_dim]
+                pos_sim = torch.matmul(anchor, pos_samples.T) / self.temperature  # [1, num_pos]
             else:
-                pos_samples = anchor[1:2]  # Use at least one positive sample
+                # Fallback: use temporal positive from same location
+                if context_len * output_dim > 1:
+                    pos_samples = projected[i, 1:2]  # [1, contrastive_dim]
+                    pos_sim = torch.matmul(anchor, pos_samples.T) / self.temperature  # [1, 1]
+                else:
+                    continue
             
-            # Create negative samples: use other locations
-            other_locations = torch.cat([projected[:i], projected[i+1:]], dim=0)  # [num_neg, context_len*output_dim, contrastive_dim]
-            neg_samples = other_locations.view(-1, self.contrastive_dim)  # [num_neg, contrastive_dim]
-            
-            if neg_samples.shape[0] > 0 and pos_samples.shape[0] > 0:
-                # Compute similarities efficiently
-                anchor_rep = anchor[0:1]  # [1, contrastive_dim]
+            # Get negative samples
+            if len(negative_indices) > 0:
+                # Use a subset of negatives to balance computation
+                max_negatives = min(len(negative_indices), 3 * num_positives)
+                if len(negative_indices) > max_negatives:
+                    neg_subset_idx = torch.randperm(len(negative_indices))[:max_negatives]
+                    negative_indices = negative_indices[neg_subset_idx]
                 
-                # Positive similarity
-                pos_sim = torch.matmul(anchor_rep, pos_samples.T) / self.temperature  # [1, num_pos]
-                
-                # Negative similarity (use more negative samples for better contrast)
-                max_neg_samples = min(neg_samples.shape[0], 32) 
-                neg_indices = torch.randperm(neg_samples.shape[0])[:max_neg_samples]
-                neg_samples_subset = neg_samples[neg_indices]
-                neg_sim = torch.matmul(anchor_rep, neg_samples_subset.T) / self.temperature  # [1, num_neg]
+                neg_samples = projected[negative_indices, 0]  # [num_neg, contrastive_dim]
+                neg_sim = torch.matmul(anchor, neg_samples.T) / self.temperature  # [1, num_neg]
                 
                 # InfoNCE loss
                 logits = torch.cat([pos_sim, neg_sim], dim=1)  # [1, num_pos + num_neg]
@@ -629,9 +657,10 @@ class AnnualEncoder(nn.Module):
         contrastive_loss = torch.tensor(0.0, device=historical_inputs.device)
         if self.enable_contrastive and compute_contrastive and self.training:
             # Apply data augmentation
+            pruned_inputs = historical_inputs[:, :, :, :10]  # Use first 10 static features to pick pos and neg samples
             augmented_weights = self.contrastive_learning.augment_weights(weights)
-            contrastive_loss = self.contrastive_learning.compute_contrastive_loss(augmented_weights)
-        
+            contrastive_loss = self.contrastive_learning.compute_contrastive_loss(pruned_inputs, augmented_weights)
+
         # print("predictions shape:", predictions.shape)
         # print("weights shape:", weights.shape)
         # exit()
@@ -652,7 +681,7 @@ class DailyDecoder(nn.Module):
         self.fc = nn.Linear(daily_hidden_dim, output_dim)
         self.head = nn.Sequential(
             nn.Linear(daily_hidden_dim, daily_hidden_dim * 4),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(daily_hidden_dim * 4, output_dim)
         )
 
