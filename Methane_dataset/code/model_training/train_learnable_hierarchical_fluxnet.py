@@ -23,6 +23,7 @@ parser.add_argument("--annual_hidden_size", type=int, default=16, help="Hidden s
 parser.add_argument("--daily_hidden_size", type=int, default=8, help="Hidden size for daily decoder")
 parser.add_argument("--inner_loss_weight", type=float, default=1.0, help="Weight for inner model loss")
 parser.add_argument("--context_years", type=int, default=1, help="Number of context years for hierarchical model")
+parser.add_argument("--pretrained", action="store_true", help="Use pretrained model for fine-tuning")
 args = parser.parse_args()
 
 config.num_context_years = args.context_years
@@ -39,6 +40,26 @@ logger = logging.getLogger()
 model = None
 optimizer = None
 scheduler = None
+
+def load_pretrained_model(pretrained_model_path, fluxnet_model):
+    pretrained_state = torch.load(pretrained_model_path, map_location='cpu', weights_only=True)
+    current_state = fluxnet_model.state_dict()
+    
+    for key, value in pretrained_state.items():
+        if key in current_state:
+            print(f"Loading weight: {key}")
+            if current_state[key].shape == value.shape:
+                current_state[key] = value
+                print(f"Loaded: {key}")
+                if 'historical_weight' in key:
+                    print(value)
+            else:
+                print(f"Shape mismatch for {key}: {current_state[key].shape} vs {value.shape}")
+    
+    fluxnet_model.load_state_dict(current_state)
+    print("Successfully loaded pretrained model with location weight matching capability")
+
+    return fluxnet_model
 
 class FluxnetBaselineDataset(Dataset):
     def __init__(self, config, mode='train'):
@@ -95,7 +116,7 @@ class FluxnetBaselineDataset(Dataset):
         return x_tensor.to(self.config.device), y_tensor.to(self.config.device)
 
 def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test_dataloader: DataLoader, model, optimizer, scheduler):
-    patience = 100
+    patience = 100 if not args.pretrained else 10
     min_delta = 1e-5
     wait = 0
     r2_max = -10.0
@@ -205,7 +226,10 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
                 torch.save(record_param, f'../model_save/hierarchical/base_lstm.pth')
                 # time.sleep(1)
             else:
-                torch.save(record_param, f'../model_save/hierarchical/base_obs.pth')
+                if args.pretrained:
+                    torch.save(record_param, f'../model_save/hierarchical/base_fine_tuned.pth')
+                else:
+                    torch.save(record_param, f'../model_save/hierarchical/base_obs.pth')
                 # time.sleep(1)
             logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
         else:
@@ -242,6 +266,12 @@ def main():
                 enable_contrastive=True,
                 dataset=train_dataset
             ).to(config.device)
+
+            if args.pretrained and args.model != "lstm":
+                pretrained_model_path = '../model_save/hierarchical/base_model-1percent-4.pth'
+                model = load_pretrained_model(pretrained_model_path, model)
+                logger.info("Loaded pretrained model for fine-tuning.")
+                # exit()
         
         train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True)
         test_dataloader = DataLoader(test_dataset, batch_size=4, shuffle=False)
