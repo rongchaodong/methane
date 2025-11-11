@@ -443,6 +443,9 @@ class FluxnetHierarchicalDataset(Dataset):
         self.mode = mode
         
         data_dir = '../../processed_data/FLUXNET-CH4/site_centric/'
+
+        self.y_mean = None
+        self.y_std = None
         
         # 1. 加载预处理好的数据
         import os
@@ -465,8 +468,44 @@ class FluxnetHierarchicalDataset(Dataset):
         self.std_vals = np.load('../../data/TEM-MDM/std_vals.npy')
         
         self.max_locations = len(self.site_to_id_map)
+        
+        self._get_normalization()
 
         print(f"Loaded {mode} dataset with {len(self.samples)} samples from {self.max_locations} unique sites.")
+
+    def _get_normalization(self):
+        if self.mode != 'train':
+            return
+        # std method: mean and std
+        # all_y_data_list = []
+        # for site_name, target_year in self.samples:
+        #     data = self.all_data_cache[site_name][target_year]
+        #     all_y_data_list.append(data['output']) 
+        
+        # all_y_data = np.concatenate(all_y_data_list, axis=0)
+
+        # self.y_mean = all_y_data.mean(axis=0)
+        # self.y_std = all_y_data.std(axis=0)
+
+        # from sklearn.preprocessing import power_transform
+        # all_y_data_list = []
+        # for site_name, target_year in self.samples:
+        #     data = self.all_data_cache[site_name][target_year]
+        #     all_y_data_list.append(data['output']) 
+        
+        # all_y_data = np.concatenate(all_y_data_list, axis=0)
+        # all_y_data_transformed = power_transform(all_y_data.reshape(-1, 1), method='yeo-johnson', standardize=True).flatten()
+
+        # log method
+        all_y_data_list = []
+        for site_name, target_year in self.samples:
+            data = self.all_data_cache[site_name][target_year]
+            all_y_data_list.append(data['output'])
+        all_y_data = np.concatenate(all_y_data_list, axis=0)
+        all_y_data_logged = np.sign(all_y_data) * np.log1p(np.abs(all_y_data))
+
+        self.y_mean = all_y_data_logged.mean(axis=0)
+        self.y_std = all_y_data_logged.std(axis=0)
 
     def __len__(self):
         return len(self.samples)
@@ -490,7 +529,12 @@ class FluxnetHierarchicalDataset(Dataset):
         # print("x_current:", x_current[150][:9])
         
         y_target_raw = current_data['output']
-        y_target = y_target_raw
+
+        if self.mode == 'train':
+            y_target_raw = np.sign(y_target_raw) * np.log1p(np.abs(y_target_raw))
+            y_target = (y_target_raw - self.y_mean) / self.y_std
+        else:
+            y_target = y_target_raw
         
         # 转换为 Tensors
         x_current = torch.tensor(x_current, dtype=torch.float32)
@@ -521,8 +565,12 @@ class FluxnetHierarchicalDataset(Dataset):
                 # print("hist_input: ", hist_input[150][:9])
                 
                 hist_target_raw = hist_data['output']
-                hist_target = hist_target_raw
-                
+                if self.mode == 'train':
+                    hist_target_raw = np.sign(hist_target_raw) * np.log1p(np.abs(hist_target_raw))
+                    hist_target = (hist_target_raw - self.y_mean) / self.y_std
+                else:
+                    hist_target = hist_target_raw
+
                 historical_inputs.append(torch.tensor(hist_input, dtype=torch.float32))
                 historical_targets.append(torch.tensor(hist_target, dtype=torch.float32))
                 
@@ -538,8 +586,12 @@ class FluxnetHierarchicalDataset(Dataset):
                     # print("earliest_input: ", earliest_input[150][:9])
                     
                     earliest_target_raw = earliest_data['output']
-                    earliest_target = earliest_target_raw
-                    
+                    if self.mode == 'train':
+                        earliest_target_raw = np.sign(earliest_target_raw) * np.log1p(np.abs(earliest_target_raw))
+                        earliest_target = (earliest_target_raw - self.y_mean) / self.y_std
+                    else:
+                        earliest_target = earliest_target_raw
+
                     historical_inputs.append(torch.tensor(earliest_input, dtype=torch.float32))
                     historical_targets.append(torch.tensor(earliest_target, dtype=torch.float32))
                 else:

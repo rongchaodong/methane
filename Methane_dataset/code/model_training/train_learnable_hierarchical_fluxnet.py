@@ -198,7 +198,10 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
                         batch_file_idx,
                         batch_historical_targets
                     )
-                    all_predictions.append(predictions.cpu().numpy().reshape(-1))
+                    # predictions = predictions * train_dataloader.dataset.y_std + train_dataloader.dataset.y_mean
+                    predictions_log = predictions.cpu().numpy() * train_dataloader.dataset.y_std + train_dataloader.dataset.y_mean
+                    predictions = np.sign(predictions_log) * (np.exp(np.abs(predictions_log)) - 1)
+                    all_predictions.append(predictions.reshape(-1))
                     all_targets.append(batch_y.cpu().numpy().reshape(-1))
         
         all_predictions = np.concatenate(all_predictions, axis=0)
@@ -223,13 +226,13 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
             best_r2 = r2
             import time
             if args.model == "lstm":
-                torch.save(record_param, f'../model_save/hierarchical/base_lstm.pth')
+                torch.save(record_param, f'../model_save/hierarchical/base_lstm_norm.pth')
                 # time.sleep(1)
             else:
                 if args.pretrained:
                     torch.save(record_param, f'../model_save/hierarchical/base_fine_tuned.pth')
                 else:
-                    torch.save(record_param, f'../model_save/hierarchical/base_obs.pth')
+                    torch.save(record_param, f'../model_save/hierarchical/base_obs_norm.pth')
                 # time.sleep(1)
             logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
         else:
