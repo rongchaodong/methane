@@ -126,94 +126,107 @@ class ContrastiveLocationLearning(nn.Module):
         Returns:
             contrastive_loss: scalar tensor
         """
-        batch_size, context_len, output_dim, weight_dim = weights.shape
         
-        # Flatten weights for processing: [B*context_len*output_dim, weight_dim]
-        weights_flat = weights.view(-1, weight_dim)
+        batch_size, context_len, seq_len, feature_dim = pruned_inputs.shape
+        _, _, output_dim, weight_dim = weights.shape
         
-        # Project to contrastive space
-        projected = self.projection_head(weights_flat)  # [B*context_len*output_dim, contrastive_dim]
+        if output_dim != 1:
+            print("output dim != 1")
+            pass 
+
+        N = batch_size * context_len 
+
+        # [B, C, 1, W] -> [B, C, W] -> [N, W]
+        weights_flat = weights.squeeze(2).view(N, weight_dim)
         
-        # Reshape back: [B, context_len*output_dim, contrastive_dim]
-        projected = projected.view(batch_size, context_len * output_dim, self.contrastive_dim)
+        # [N, W] -> [N, contrastive_dim]
+        projected = self.projection_head(weights_flat)
         
-        # Normalize for cosine similarity
+        # [N, contrastive_dim]
         projected = F.normalize(projected, dim=-1)
+
+        # [B, C, S, F] -> [B, C, F]
+        input_repr = pruned_inputs.mean(dim=2)        
+        # [B, C, F] -> [N, F]
+        input_repr_flat = input_repr.view(N, feature_dim)
         
-        # Compute input similarity for positive/negative sampling
-        # Average over context_len and seq_len to get location-level representation
-        input_repr = pruned_inputs.mean(dim=(1, 2))  # [B, feature_dim]
-        input_repr = F.normalize(input_repr, dim=-1)  # normalize for cosine similarity
-        
-        # Compute pairwise cosine similarities between locations
-        input_similarities = torch.matmul(input_repr, input_repr.T)  # [B, B]
+        # [N, F]
+        input_repr_flat = F.normalize(input_repr_flat, dim=-1)
+
+        # [N, N]
+        input_similarities = torch.matmul(input_repr_flat, input_repr_flat.T)
         
         total_loss = 0.0
         valid_pairs = 0
         
-        # Number of positive samples: 1/4 of batch size (excluding self)
-        num_positives = max(1, (batch_size - 1) // 4)
-        
-        for i in range(batch_size):
-            # Get similarities for location i with all other locations
-            similarities = input_similarities[i]  # [B]
+        similarity_threshold = 0.70
+        positive_cap = 4 * context_len
+
+        for i in range(N):
+            anchor = projected[i:i+1]  # [1, contrastive_dim]
+            similarities = input_similarities[i]  # [N]
             
-            # Exclude self-similarity
-            mask = torch.ones(batch_size, dtype=torch.bool, device=similarities.device)
+            mask = torch.ones(N, dtype=torch.bool, device=similarities.device)
             mask[i] = False
-            other_similarities = similarities[mask]  # [B-1]
-            other_indices = torch.arange(batch_size, device=similarities.device)[mask]  # [B-1]
+            
+            other_similarities = similarities[mask]  # [N-1]
+            other_indices = torch.arange(N, device=similarities.device)[mask]  # [N-1]
             
             if len(other_indices) == 0:
                 continue
                 
-            # Select top similar locations as positives
-            _, top_indices = torch.topk(other_similarities, min(num_positives, len(other_indices)))
-            positive_indices = other_indices[top_indices]
+            threshold_mask = (other_similarities > similarity_threshold) # [N- 1 - threshold]
             
-            # Remaining locations as negatives
-            negative_mask = torch.ones(len(other_indices), dtype=torch.bool, device=similarities.device)
-            negative_mask[top_indices] = False
-            negative_indices = other_indices[negative_mask]
+            if not torch.any(threshold_mask):
+                # Fallback: at least one positive sample
+                k = 1
+                _, top_k_indices_relative = torch.topk(other_similarities, k) # [1]
+                
+                positive_mask = torch.zeros_like(other_similarities, dtype=torch.bool)
+                positive_mask[top_k_indices_relative] = True # [N-1]
             
-            # Get anchor representation (use first context*output representation)
-            anchor = projected[i, 0:1]  # [1, contrastive_dim]
-            
-            # Get positive samples (use first context*output representation from each positive location)
-            if len(positive_indices) > 0:
-                pos_samples = projected[positive_indices, 0]  # [num_pos, contrastive_dim]
-                pos_sim = torch.matmul(anchor, pos_samples.T) / self.temperature  # [1, num_pos]
             else:
-                # Fallback: use temporal positive from same location
-                if context_len * output_dim > 1:
-                    pos_samples = projected[i, 1:2]  # [1, contrastive_dim]
-                    pos_sim = torch.matmul(anchor, pos_samples.T) / self.temperature  # [1, 1]
-                else:
-                    continue
+                masked_similarities = other_similarities.clone()
+                masked_similarities[~threshold_mask] = -float('inf')
+                
+                num_passed_threshold = torch.sum(threshold_mask).item()
+                k = min(num_passed_threshold, positive_cap)
+                # print(f"{k} positive samples")
+                
+                _, top_k_indices_relative = torch.topk(masked_similarities, k) # [k]
+                
+                positive_mask = torch.zeros_like(other_similarities, dtype=torch.bool)
+                positive_mask[top_k_indices_relative] = True # [N-1]
+
+            positive_indices = other_indices[positive_mask]  # [k]
+            negative_indices = other_indices[~positive_mask] # [N-1-k]
+
+            if len(negative_indices) == 0:
+                continue 
+                
+            pos_samples = projected[positive_indices]  # [k, contrastive_dim]
+            # print("check:", input_repr_flat[i:i+1])
+            # print("positive samples:", input_repr_flat[positive_indices])
+            # exit()
+            pos_sim = torch.matmul(anchor, pos_samples.T) / self.temperature  # [1, k]
             
-            # Get negative samples
-            if len(negative_indices) > 0:
-                # Use a subset of negatives to balance computation
-                max_negatives = min(len(negative_indices), 3 * num_positives)
-                if len(negative_indices) > max_negatives:
-                    neg_subset_idx = torch.randperm(len(negative_indices))[:max_negatives]
-                    negative_indices = negative_indices[neg_subset_idx]
-                
-                neg_samples = projected[negative_indices, 0]  # [num_neg, contrastive_dim]
-                neg_sim = torch.matmul(anchor, neg_samples.T) / self.temperature  # [1, num_neg]
-                
-                # InfoNCE loss
-                logits = torch.cat([pos_sim, neg_sim], dim=1)  # [1, num_pos + num_neg]
-                labels = torch.zeros(1, dtype=torch.long, device=logits.device)
-                
-                loss = F.cross_entropy(logits, labels)
-                total_loss += loss
+            neg_samples = projected[negative_indices] # [num_neg, contrastive_dim]
+            neg_sim = torch.matmul(anchor, neg_samples.T) / self.temperature # [1, num_neg]
+
+            exp_pos = torch.exp(pos_sim).sum(dim=1)  # [1]
+            exp_neg = torch.exp(neg_sim).sum(dim=1)  # [1]
+
+            denominator = exp_pos + exp_neg
+
+            if denominator > 1e-8:
+                loss = -torch.log(exp_pos / denominator)
+                total_loss += loss.item() 
                 valid_pairs += 1
-        
+
         if valid_pairs > 0:
-            return total_loss / valid_pairs
+            return torch.tensor(total_loss / valid_pairs, device=weights.device, requires_grad=True)
         else:
-            return torch.tensor(0.0, device=weights.device)
+            return torch.tensor(0.0, device=weights.device, requires_grad=True)
 
 class HierarchicalTemporalDataset(Dataset):
     """

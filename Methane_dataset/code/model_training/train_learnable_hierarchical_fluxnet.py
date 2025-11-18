@@ -29,7 +29,7 @@ args = parser.parse_args()
 config.num_context_years = args.context_years
 # Setup logging
 logging.basicConfig(
-    filename=f"log/learnable_lstm_{args.type}.log",
+    filename=f"log/learnable_pretrained_{args.type}.log",
     filemode="a",
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -116,7 +116,7 @@ class FluxnetBaselineDataset(Dataset):
         return x_tensor.to(self.config.device), y_tensor.to(self.config.device)
 
 def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test_dataloader: DataLoader, model, optimizer, scheduler):
-    patience = 100 if not args.pretrained else 10
+    patience = 100 if not args.pretrained else 100
     min_delta = 1e-5
     wait = 0
     r2_max = -10.0
@@ -232,7 +232,7 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
                 if args.pretrained:
                     torch.save(record_param, f'../model_save/hierarchical/base_fine_tuned.pth')
                 else:
-                    torch.save(record_param, f'../model_save/hierarchical/base_obs_norm.pth')
+                    torch.save(record_param, f'../model_save/hierarchical/base_obs_norm_le.pth')
                 # time.sleep(1)
             logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
         else:
@@ -271,7 +271,7 @@ def main():
             ).to(config.device)
 
             if args.pretrained and args.model != "lstm":
-                pretrained_model_path = '../model_save/hierarchical/base_model-1percent-4.pth'
+                pretrained_model_path = '../model_save/hierarchical/base_model-1percent-6.pth'
                 model = load_pretrained_model(pretrained_model_path, model)
                 logger.info("Loaded pretrained model for fine-tuning.")
                 # exit()
