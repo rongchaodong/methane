@@ -210,11 +210,10 @@ def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: Data
                 torch.save(record_param, f'../model_save/{args.model}/base.pth')
                 logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
             else:
-                pass
                 # import time
                 # time.sleep(1)
                 # torch.save(record_param, f'../model_save/{args.model}/base_obs.pth')
-                # logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
+                logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
 
         else:
             wait += 1
@@ -388,5 +387,5 @@ def main():
             train_dataset = Dataset(train_x.to(device), train_y.to(device))
             train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=False)
             obs_train(args.epoch, train_dataloader, test_dataloader)
-
-main()
+if __name__ == "__main__":
+    main()

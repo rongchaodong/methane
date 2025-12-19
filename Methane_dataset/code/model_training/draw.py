@@ -8,7 +8,7 @@ from hybrid import LSTM_Transformer
 from hierarchical import Hierarchical, HierarchicalTemporalDataset
 from hierarchical_x_y import EnhancedHierarchicalMultiEmbedding
 from hierarchical_x_y import HierarchicalTemporalDataset as hierarchy_temporal_x_y
-from cross_feature_attention import ImprovedCrossFeatureAttentionModel
+from cross_feature_attention import ImprovedCrossFeatureAttentionModel, NoInterGroupModel, NoIntraGroupModel
 import argparse
 import math 
 
@@ -76,7 +76,8 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
     elif model_str == "mul-emb":
         model = EnhancedHierarchicalMultiEmbedding(11, 8, 5, 8, 1).to(config.device)
     elif model_str == "cross":
-        model = ImprovedCrossFeatureAttentionModel(config).to(config.device)
+        # model = ImprovedCrossFeatureAttentionModel(config).to(config.device)
+        model = NoIntraGroupModel(config).to(config.device)
     elif model_str == "learnable_hidden_lstm":
         from learnable_hidden_state_lstm import LearnableHiddenStateLSTMWrapper
         model = LearnableHiddenStateLSTMWrapper(
@@ -111,7 +112,7 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
              elif model_str == "learnable_hidden_lstm":
                 path = f'../model_save/{model_str}/base_lstm.pth'
              else:
-                path = f'../model_save/{model_str}/base.pth'
+                path = f'../model_save/{model_str}/base_no_intra.pth'
         else:
             if model_str == "hierarchy":
                 path = f'../model_save/{model_str}/base_obs-{year}.pth'
@@ -120,7 +121,9 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
             elif model_str == "learnable_hidden_lstm":
                 path = f'../model_save/{model_str}/base_obs_lstm.pth' 
             elif model_str == "learnable_hidden_fluxnet":
-                path = f'../model_save/hierarchical/base_obs.pth'
+                path = f'../model_save/hierarchical/base_obs_norm.pth'
+            elif model_str == "cross":
+                path = f'../model_save/{model_str}/base_obs_no_intra.pth'
             else:
                 path = f'../model_save/hierarchical/base_lstm.pth'
 
@@ -194,7 +197,7 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
             #     _, prediction = model(batch_X)
             #     all_predictions.append(prediction.cpu().numpy().reshape(-1))
             #     all_targets.append(batch_y.cpu().numpy().reshape(-1))
-            if model_str == "lstm":
+            if model_str == "lstm" or model_str == "cross":
                 for batch_x, batch_y in test_dataloader:
                     _, predictions = model(batch_x)
                     all_predictions.append(predictions.cpu().numpy().reshape(-1))
@@ -207,7 +210,10 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
                         batch_file_idx,
                         batch_historical_targets
                     )
-                    all_predictions.append(predictions.cpu().numpy().reshape(-1))
+                    # predictions = predictions * train_dataset.y_std + train_dataset.y_mean
+                    predictions_log = predictions.cpu().numpy() * train_dataset.y_std + train_dataset.y_mean
+                    predictions = np.sign(predictions_log) * (np.exp(np.abs(predictions_log)) - 1)
+                    all_predictions.append(predictions.reshape(-1))
                     all_targets.append(batch_y.cpu().numpy().reshape(-1))
 
     if simulated:
@@ -223,7 +229,7 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
             if model_str == "hierarchy" or model_str == "mul-emb":
                 plt.savefig(f'figure/prediction_TEM_{model_str}-{year}.png')
             else:
-                plt.savefig(f'figure/prediction_TEM_{model_str}-{args.index}-learnable.png')
+                plt.savefig(f'figure/no_intra_{index}.png')
     else:
         num_indices = len(all_predictions)
         
@@ -257,7 +263,141 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
 
         plt.tight_layout() 
 
-        plt.savefig(f'figure/pred_OBS_2.png')
+        plt.savefig(f'figure/no_intra_obs_{index}.png')
 
 
-yearly_draw("learnable_hidden_fluxnet", False, 1, 0)
+def compare_models_draw(simulated: bool, index: int = 0):
+    """
+    Draw comparison of 5 models: LSTM, Cross (full), No Inter-Group, No Intra-Group, Transformer
+    """
+    model_configs = [
+        # ("lstm", "LSTM", LSTM(config)),
+        ("cross_full", "HCFA", ImprovedCrossFeatureAttentionModel(config)),
+        ("cross_no_inter", "No Inter-Group", NoInterGroupModel(config)),
+        ("cross_no_intra", "No Intra-Group", NoIntraGroupModel(config)),
+        ("transformer", "Transformer", Transformer(config)),
+    ]
+    
+    # Prepare datasets
+    if simulated:
+        test_years = range(1999, 2019)
+        test_dataset = TemporalDataset(test_years)
+        test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
+    else:
+        from train_learnable_hierarchical_fluxnet import FluxnetBaselineDataset
+        test_dataset = FluxnetBaselineDataset(config, mode='test')
+        test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+    
+    # Collect predictions for all models
+    all_model_predictions = []
+    ground_truth = None
+    
+    for model_key, model_name, model in model_configs:
+        model = model.to(config.device)
+        
+        # Load model weights
+        try:
+            if simulated:
+                if model_key == "cross_full":
+                    path = f'../model_save/cross/base-2.pth'
+                elif model_key == "cross_no_inter":
+                    path = f'../model_save/cross/base_no_inter.pth'
+                elif model_key == "cross_no_intra":
+                    path = f'../model_save/cross/base_no_intra.pth'
+                else:
+                    path = f'../model_save/{model_key}/base.pth'
+            else:
+                if model_key == "cross_full":
+                    path = f'../model_save/cross/base_obs-2.pth'
+                elif model_key == "cross_no_inter":
+                    path = f'../model_save/cross/base_obs_no_inter.pth'
+                elif model_key == "cross_no_intra":
+                    path = f'../model_save/cross/base_obs_no_intra.pth'
+                else:
+                    path = f'../model_save/{model_key}/base_obs.pth'
+            
+            model.load_state_dict(torch.load(path, weights_only=True))
+            print(f"Loaded model: {model_name} from {path}")
+        except FileNotFoundError:
+            print(f"Warning: Could not find {path}, skipping {model_name}")
+            all_model_predictions.append((model_name, None))
+            continue
+        
+        # Run inference
+        model.eval()
+        predictions_list = []
+        targets_list = []
+        
+        with torch.no_grad():
+            if simulated:
+                for batch_X, batch_y in test_dataloader:
+                    _, prediction = model(batch_X)
+                    predictions_list.append(prediction.cpu().numpy())
+                    targets_list.append(batch_y.cpu().numpy())
+                    break  # Only take first batch for visualization
+                
+                predictions = predictions_list[0]
+                targets = targets_list[0]
+            else:
+                for batch_x, batch_y in test_dataloader:
+                    _, prediction = model(batch_x)
+                    predictions_list.append(prediction.cpu().numpy().reshape(-1))
+                    targets_list.append(batch_y.cpu().numpy().reshape(-1))
+                
+                predictions = predictions_list[index] if index < len(predictions_list) else predictions_list[0]
+                targets = targets_list[index] if index < len(targets_list) else targets_list[0]
+        
+        all_model_predictions.append((model_name, predictions))
+        
+        if ground_truth is None:
+            ground_truth = targets
+    
+    # Create comparison plot
+    plt.figure(figsize=(14, 6))
+    
+    # Plot ground truth
+    if ground_truth is not None:
+        if simulated:
+            plt.plot(ground_truth[index], label='Ground Truth', linewidth=2, color='black', linestyle='--')
+        else:
+            plt.plot(ground_truth, label='Ground Truth', linewidth=2, color='black', linestyle='--')
+    
+    # Plot predictions from all models
+    colors = ['blue', 'green', 'red', 'orange', 'purple']
+    for i, (model_name, predictions) in enumerate(all_model_predictions):
+        if predictions is not None:
+            if simulated:
+                plt.plot(predictions[index], label=model_name, linewidth=1.5, color=colors[i], alpha=0.8)
+            else:
+                plt.plot(predictions, label=model_name, linewidth=1.5, color=colors[i], alpha=0.8)
+    
+    # Add title based on dataset type
+    if simulated:
+        plt.title(f'Model Comparison - Simulated Data (Index {index})', fontsize=14, fontweight='bold')
+    else:
+        site, year = test_dataset.samples[index]
+        plt.title(f'Model Comparison - Observed Data: {site} ({year})', fontsize=14, fontweight='bold')
+    
+    plt.xlabel('Day of Year', fontsize=12)
+    plt.ylabel('CH4 Emissions', fontsize=12)
+    plt.legend(loc='best', fontsize=10)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    # Save figure
+    if simulated:
+        plt.savefig(f'figure/simulated_idx{index}.png', dpi=300)
+        print(f"Saved: figure/model_comparison_simulated_idx{index}.png")
+    else:
+        plt.savefig(f'figure/model_comparison_obs_idx{index}.png', dpi=300)
+        print(f"Saved: figure/obs_idx{index}.png")
+    
+    plt.close()
+
+
+# Draw comparisons for both simulated and observed data
+print("Drawing simulated data comparison (index=0)...")
+compare_models_draw(simulated=True, index=0)
+
+print("\nDrawing observed data comparison (index=3)...")
+compare_models_draw(simulated=False, index=0)
