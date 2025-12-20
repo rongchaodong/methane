@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 import numpy as np
 from config import Config
+import os
+import pickle
 
 config = Config()
 
@@ -196,6 +198,131 @@ class HierarchicalSpatialDataset(Dataset):
             torch.tensor(x_daily, dtype=torch.float32).to(config.device),
             x_yearly.to(config.device),
             torch.tensor(y_target, dtype=torch.float32).to(config.device)
+        )
+
+class FluxnetDataset(Dataset):
+    """
+    FLUXNET 数据的分层时间数据集
+    仿照 HierarchicalTemporalDataset 的结构:
+    1. x_daily: fast features (B, T=365, K_fast=5)
+    2. x_yearly: slow features (B, num_context_years, K_slow=10)
+    3. y_target: raw target values (B, T=365)
+    """
+    def __init__(self, config, mode='train'):
+        self.config = config
+        self.mode = mode
+        
+        # K_slow 和 K_fast 的设置与 HierarchicalTemporalDataset 一致
+        self.K_slow = 10 
+        self.K_fast = 5
+        
+        # 数据缓存目录
+        data_dir = '../../processed_data/FLUXNET-CH4/site_centric/'
+        
+        # 1. 加载预处理好的数据
+        with open(os.path.join(data_dir, 'all_data_cache.pkl'), 'rb') as f:
+            self.all_data_cache = pickle.load(f)
+            
+        if mode == 'train':
+            with open(os.path.join(data_dir, 'train_samples.pkl'), 'rb') as f:
+                self.samples = pickle.load(f)
+        elif mode == 'test':
+            with open(os.path.join(data_dir, 'test_samples.pkl'), 'rb') as f:
+                self.samples = pickle.load(f)
+        else:
+            raise ValueError(f"Mode '{mode}' not recognized. Use 'train' or 'test'.")
+
+        # 2. 加载用于标准化的均值和标准差
+        self.mean_vals = np.load('../../data/TEM-MDM/mean_vals.npy')
+        self.std_vals = np.load('../../data/TEM-MDM/std_vals.npy')
+        
+        # 3. 预计算所有站点的年度慢特征缓存
+        self.yearly_features_cache = self._precompute_yearly_features()
+        
+        print(f"Loaded {mode} dataset with {len(self.samples)} samples.")
+
+    def _precompute_yearly_features(self):
+        """
+        预计算所有站点-年份的慢特征（K_slow=10）
+        仿照 HierarchicalTemporalDataset._precompute_yearly_features
+        """
+        cache = {}
+        mean_slow = self.mean_vals[:self.K_slow]
+        std_slow = self.std_vals[:self.K_slow]
+        
+        for site_name, site_data in self.all_data_cache.items():
+            cache[site_name] = {}
+            for year, data in site_data.items():
+                # 取第一天的慢特征（前 K_slow 个特征）作为该年度的代表
+                slow_features = data['input'][0, :self.K_slow]
+                # 标准化
+                normalized_slow = (slow_features - mean_slow) / std_slow
+                cache[site_name][year] = torch.tensor(normalized_slow, dtype=torch.float32).detach()
+        
+        return cache
+
+    def __len__(self):
+        """返回数据集中的样本总数"""
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        """
+        根据索引获取一个样本
+        返回: (x_daily, x_yearly, y_target)
+        - x_daily: [365, K_fast=5] 快特征（已标准化）
+        - x_yearly: [num_context_years, K_slow=10] 历史年度慢特征（已标准化）
+        - y_target: [365] 原始目标值（未标准化）
+        """
+        # 1. 获取站点名称和目标年份
+        site_name, target_year = self.samples[idx]
+        
+        # 2. 获取当前年份的数据
+        current_data = self.all_data_cache[site_name][target_year]
+        x_raw = current_data['input']  # [365, 15]
+        y_raw = current_data['output']  # [365]
+        
+        # 3. 标准化输入并分离快慢特征
+        x_normalized = (x_raw - self.mean_vals) / self.std_vals
+        x_daily = x_normalized[:, self.K_slow:]  # [365, K_fast=5] 快特征
+        
+        # 4. y 保持原始数据，不做标准化
+        y_target = y_raw
+        
+        # 5. 收集历史年份的慢特征
+        site_data = self.all_data_cache[site_name]
+        
+        # 找到所有早于目标年份的年份，并按降序排列
+        available_hist_years = sorted(
+            [y for y in site_data.keys() if y < target_year], 
+            reverse=True
+        )
+        
+        context_vectors = []
+        for i in range(1): # context year number set to 1
+            if i < len(available_hist_years):
+                # 情况1: 有真实的历史年份
+                hist_year = available_hist_years[i]
+                vec = self.yearly_features_cache[site_name][hist_year]
+            else:
+                # 情况2: 历史年份不足，使用最早的年份
+                if len(available_hist_years) > 0:
+                    earliest_year = available_hist_years[-1]
+                    vec = self.yearly_features_cache[site_name][earliest_year]
+                else:
+                    # 情况3: 没有历史数据（极端情况），使用当前年度的慢特征
+                    vec = self.yearly_features_cache[site_name][target_year]
+            
+            context_vectors.append(vec)
+        
+        x_yearly = torch.stack(context_vectors)  # [num_context_years, K_slow=10]
+        
+        x_daily_tensor = torch.tensor(x_daily, dtype=torch.float32)
+        y_target_tensor = torch.tensor(y_target, dtype=torch.float32)
+        
+        return (
+            x_daily_tensor.to(config.device),
+            x_yearly.to(config.device),
+            y_target_tensor.to(config.device)
         )
 
 # class AnnualEncoder(nn.Module):

@@ -7,7 +7,7 @@ import math
 import logging
 from sklearn.metrics import mean_squared_error, r2_score
 from config import Config
-from cross_feature_attention import ImprovedCrossFeatureAttentionModel
+from cross_feature_attention import ImprovedCrossFeatureAttentionModel, NoIntraGroupModel, NoInterGroupModel
 
 
 config = Config()
@@ -19,6 +19,8 @@ parser.add_argument("--simulated", action="store_true", help="training simulated
 parser.add_argument("--data_type", type=str, default="seq", help="Model selection: random, or seq")
 parser.add_argument("--epoch", type=int, default=100, help="Training epoches")
 parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
+parser.add_argument("--ablation", type=str, default="full", 
+                    help="Ablation study model: 'full' (default), 'no_intra' (without intra-group attention), 'no_inter' (without inter-group attention)")
 args = parser.parse_args()
 
 
@@ -103,7 +105,7 @@ class SpatialDataset(Dataset):
         return torch.tensor(input_data, dtype=torch.float32).to(self.device), torch.tensor(output_data, dtype=torch.float32).to(self.device)
 
 logging.basicConfig(
-    filename=f"log/{args.data_type}_{args.type}_cross.log" if args.simulated else f"log/base_obs_{args.type}_cross.log", 
+    filename=f"log/{args.data_type}_{args.type}_cross_{args.ablation}.log" if args.simulated else f"log/base_obs_{args.type}_cross_{args.ablation}.log", 
     filemode="a",
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO 
@@ -111,12 +113,22 @@ logging.basicConfig(
 
 logger = logging.getLogger()
 
-#model selection
-model = ImprovedCrossFeatureAttentionModel(config).to(config.device)
+# Model selection based on ablation flag
+if args.ablation == "no_intra":
+    model = NoIntraGroupModel(config).to(config.device)
+    logger.info("Using ablation model: No Intra-Group Attention")
+elif args.ablation == "no_inter":
+    model = NoInterGroupModel(config).to(config.device)
+    logger.info("Using ablation model: No Inter-Group Attention")
+else:  # full model
+    model = ImprovedCrossFeatureAttentionModel(config).to(config.device)
+    logger.info("Using full model: Improved Cross-Feature Attention")
+
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
 total_params = sum(p.numel() for p in model.parameters())
 print(f"模型的参数量为: {total_params}")
+logger.info(f"Model parameters: {total_params}")
 
 def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: DataLoader):
     #hyperparameter
@@ -180,13 +192,13 @@ def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: Data
             best_nrmse = nrmse
             best_r2 = r2
             if args.simulated:
-                torch.save(record_param, f'../model_save/cross/base-2.pth')
+                torch.save(record_param, f'../model_save/cross/base_{args.ablation}.pth')
                 logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
             else:
                 # pass
                 import time
                 time.sleep(1)
-                torch.save(record_param, f'../model_save/cross/base_obs-2.pth')
+                torch.save(record_param, f'../model_save/cross/base_obs_{args.ablation}.pth')
                 logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
 
         else:

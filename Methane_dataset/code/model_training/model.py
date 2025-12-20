@@ -15,11 +15,11 @@ class LSTM(nn.Module):
         super(LSTM, self).__init__()
         self.hidden_size = configs.hidden_size
         self.num_layers = configs.num_layers
-        self.lstm = nn.LSTM(configs.input_size, configs.hidden_size, configs.num_layers, batch_first=True)
+        self.lstm = nn.LSTM(configs.input_size, configs.hidden_size, num_layers=3, batch_first=True)
 
         self.head = nn.Sequential(
             nn.Linear(configs.hidden_size, configs.hidden_size * 4),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(configs.hidden_size * 4, configs.output_size)
         )
         self.fc = nn.Linear(configs.hidden_size, configs.output_size)
