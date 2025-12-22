@@ -1,13 +1,13 @@
 import sys
-sys.path.append(f'Time-Series-Library-main/')
-sys.path.append(f'Time-Series-Library-main/layers/')
+sys.path.append(f'Time-Series-Library/')
+sys.path.append(f'Time-Series-Library/layers/')
 import torch
 import torch.nn as nn
 from torch.nn.utils import weight_norm
 from typing import Tuple
 from Transformer_EncDec import Encoder, EncoderLayer
 from SelfAttention_Family import FullAttention, AttentionLayer
-from Embed import DataEmbedding_inverted
+from Embed import DataEmbedding_inverted, PatchEmbedding
 from layers.Pyraformer_EncDec import Encoder as Pyra_Encoder
 
 class LSTM(nn.Module):
@@ -329,3 +329,642 @@ class Pyraformer(nn.Module):
             enc_out.size(0), self.pred_len, -1)
         dec_out = self.linear(dec_emb[:, -self.pred_len:, :] )
         return dec_emb[:, -self.pred_len:, :], dec_out[:,:,0] # [B, L, D]
+    
+
+### TSMixer implmentation
+
+class ResBlock(nn.Module):
+    def __init__(self, configs):
+        super(ResBlock, self).__init__()
+
+        self.temporal = nn.Sequential(
+            nn.Linear(configs.seq_len, configs.d_model),
+            nn.ReLU(),
+            nn.Linear(configs.d_model, configs.seq_len),
+            nn.Dropout(configs.dropout)
+        )
+
+        self.channel = nn.Sequential(
+            nn.Linear(configs.enc_in, configs.d_model),
+            nn.ReLU(),
+            nn.Linear(configs.d_model, configs.enc_in),
+            nn.Dropout(configs.dropout)
+        )
+
+    def forward(self, x):
+        # x: [B, L, D]
+        x = x + self.temporal(x.transpose(1, 2)).transpose(1, 2)
+        x = x + self.channel(x)
+
+        return x
+
+
+class TSMixer(nn.Module):
+    def __init__(self, configs):
+        super(TSMixer, self).__init__()
+        self.task_name = configs.task_name
+        self.layer = configs.e_layers
+        self.model = nn.ModuleList([ResBlock(configs)
+                                    for _ in range(configs.e_layers)])
+        self.pred_len = configs.pred_len
+        self.projection = nn.Linear(configs.seq_len, configs.pred_len)
+
+        ## add a target projection layer for methane forecasting
+        self.output_layer = nn.Linear(configs.enc_in, configs.c_out)
+
+    def forecast(self, x_enc):
+
+        # x: [B, L, D]
+        for i in range(self.layer):
+            x_enc = self.model[i](x_enc)
+        enc_out = self.projection(x_enc.transpose(1, 2)).transpose(1, 2)
+        enc_out = self.output_layer(enc_out)
+
+        return enc_out
+
+    def forward(self, x_enc):
+        if self.task_name == 'long_term_forecast' or self.task_name == 'short_term_forecast':
+            dec_out = self.forecast(x_enc)
+            return dec_out[:, -self.pred_len:, :], dec_out.squeeze()  # [B, L, D], [B, L]
+        else:
+            raise ValueError('Only forecast tasks implemented yet')
+        
+
+
+# implementation of TimeMixer model
+from layers.Autoformer_EncDec import series_decomp
+from layers.Embed import DataEmbedding_wo_pos
+from layers.StandardNorm import Normalize
+
+
+class DFT_series_decomp(nn.Module):
+    """
+    Series decomposition block
+    """
+
+    def __init__(self, top_k: int = 5):
+        super(DFT_series_decomp, self).__init__()
+        self.top_k = top_k
+
+    def forward(self, x):
+        xf = torch.fft.rfft(x)
+        freq = abs(xf)
+        freq[0] = 0
+        top_k_freq, top_list = torch.topk(freq, k=self.top_k)
+        xf[freq <= top_k_freq.min()] = 0
+        x_season = torch.fft.irfft(xf)
+        x_trend = x - x_season
+        return x_season, x_trend
+
+
+class MultiScaleSeasonMixing(nn.Module):
+    """
+    Bottom-up mixing season pattern
+    """
+
+    def __init__(self, configs):
+        super(MultiScaleSeasonMixing, self).__init__()
+
+        self.down_sampling_layers = torch.nn.ModuleList(
+            [
+                nn.Sequential(
+                    torch.nn.Linear(
+                        configs.seq_len // (configs.down_sampling_window ** i),
+                        configs.seq_len // (configs.down_sampling_window ** (i + 1)),
+                    ),
+                    nn.GELU(),
+                    torch.nn.Linear(
+                        configs.seq_len // (configs.down_sampling_window ** (i + 1)),
+                        configs.seq_len // (configs.down_sampling_window ** (i + 1)),
+                    ),
+
+                )
+                for i in range(configs.down_sampling_layers)
+            ]
+        )
+
+    def forward(self, season_list):
+
+        # mixing high->low
+        out_high = season_list[0]
+        out_low = season_list[1]
+        out_season_list = [out_high.permute(0, 2, 1)]
+
+        for i in range(len(season_list) - 1):
+            out_low_res = self.down_sampling_layers[i](out_high)
+            out_low = out_low + out_low_res
+            out_high = out_low
+            if i + 2 <= len(season_list) - 1:
+                out_low = season_list[i + 2]
+            out_season_list.append(out_high.permute(0, 2, 1))
+
+        return out_season_list
+
+
+class MultiScaleTrendMixing(nn.Module):
+    """
+    Top-down mixing trend pattern
+    """
+
+    def __init__(self, configs):
+        super(MultiScaleTrendMixing, self).__init__()
+
+        self.up_sampling_layers = torch.nn.ModuleList(
+            [
+                nn.Sequential(
+                    torch.nn.Linear(
+                        configs.seq_len // (configs.down_sampling_window ** (i + 1)),
+                        configs.seq_len // (configs.down_sampling_window ** i),
+                    ),
+                    nn.GELU(),
+                    torch.nn.Linear(
+                        configs.seq_len // (configs.down_sampling_window ** i),
+                        configs.seq_len // (configs.down_sampling_window ** i),
+                    ),
+                )
+                for i in reversed(range(configs.down_sampling_layers))
+            ])
+
+    def forward(self, trend_list):
+
+        # mixing low->high
+        trend_list_reverse = trend_list.copy()
+        trend_list_reverse.reverse()
+        out_low = trend_list_reverse[0]
+        out_high = trend_list_reverse[1]
+        out_trend_list = [out_low.permute(0, 2, 1)]
+
+        for i in range(len(trend_list_reverse) - 1):
+            out_high_res = self.up_sampling_layers[i](out_low)
+            out_high = out_high + out_high_res
+            out_low = out_high
+            if i + 2 <= len(trend_list_reverse) - 1:
+                out_high = trend_list_reverse[i + 2]
+            out_trend_list.append(out_low.permute(0, 2, 1))
+
+        out_trend_list.reverse()
+        return out_trend_list
+
+
+class PastDecomposableMixing(nn.Module):
+    def __init__(self, configs):
+        super(PastDecomposableMixing, self).__init__()
+        self.seq_len = configs.seq_len
+        self.pred_len = configs.pred_len
+        self.down_sampling_window = configs.down_sampling_window
+
+        self.layer_norm = nn.LayerNorm(configs.d_model)
+        self.dropout = nn.Dropout(configs.dropout)
+        self.channel_independence = configs.channel_independence
+
+        if configs.decomp_method == 'moving_avg':
+            self.decompsition = series_decomp(configs.moving_avg)
+        elif configs.decomp_method == "dft_decomp":
+            self.decompsition = DFT_series_decomp(configs.top_k)
+        else:
+            raise ValueError('decompsition is error')
+
+        if not configs.channel_independence:
+            self.cross_layer = nn.Sequential(
+                nn.Linear(in_features=configs.d_model, out_features=configs.d_ff),
+                nn.GELU(),
+                nn.Linear(in_features=configs.d_ff, out_features=configs.d_model),
+            )
+
+        # Mixing season
+        self.mixing_multi_scale_season = MultiScaleSeasonMixing(configs)
+
+        # Mxing trend
+        self.mixing_multi_scale_trend = MultiScaleTrendMixing(configs)
+
+        self.out_cross_layer = nn.Sequential(
+            nn.Linear(in_features=configs.d_model, out_features=configs.d_ff),
+            nn.GELU(),
+            nn.Linear(in_features=configs.d_ff, out_features=configs.d_model),
+        )
+
+    def forward(self, x_list):
+        length_list = []
+        for x in x_list:
+            _, T, _ = x.size()
+            length_list.append(T)
+
+        # Decompose to obtain the season and trend
+        season_list = []
+        trend_list = []
+        for x in x_list:
+            season, trend = self.decompsition(x)
+            if not self.channel_independence:
+                season = self.cross_layer(season)
+                trend = self.cross_layer(trend)
+            season_list.append(season.permute(0, 2, 1))
+            trend_list.append(trend.permute(0, 2, 1))
+
+        # bottom-up season mixing
+        out_season_list = self.mixing_multi_scale_season(season_list)
+        # top-down trend mixing
+        out_trend_list = self.mixing_multi_scale_trend(trend_list)
+
+        out_list = []
+        for ori, out_season, out_trend, length in zip(x_list, out_season_list, out_trend_list,
+                                                      length_list):
+            out = out_season + out_trend
+            if self.channel_independence:
+                out = ori + self.out_cross_layer(out)
+            out_list.append(out[:, :length, :])
+        return out_list
+
+
+class TimeMixer(nn.Module):
+
+    def __init__(self, configs):
+        super(TimeMixer, self).__init__()
+        self.configs = configs
+        self.task_name = configs.task_name
+        self.seq_len = configs.seq_len
+        self.pred_len = configs.pred_len
+        self.down_sampling_window = configs.down_sampling_window
+        self.channel_independence = configs.channel_independence
+        self.pdm_blocks = nn.ModuleList([PastDecomposableMixing(configs)
+                                         for _ in range(configs.e_layers)])
+
+        self.preprocess = series_decomp(configs.moving_avg)
+        self.enc_in = configs.enc_in
+
+        if self.channel_independence:
+            self.enc_embedding = DataEmbedding_wo_pos(1, configs.d_model, configs.embed, configs.freq,
+                                                      configs.dropout)
+        else:
+            self.enc_embedding = DataEmbedding_wo_pos(configs.enc_in, configs.d_model, configs.embed, configs.freq,
+                                                      configs.dropout)
+
+        self.layer = configs.e_layers
+
+        self.normalize_layers = torch.nn.ModuleList(
+            [
+                Normalize(self.configs.enc_in, affine=True, non_norm=True if configs.use_norm == 0 else False)
+                for i in range(configs.down_sampling_layers + 1)
+            ]
+        )
+
+        if self.task_name == 'long_term_forecast' or self.task_name == 'short_term_forecast':
+            self.predict_layers = torch.nn.ModuleList(
+                [
+                    torch.nn.Linear(
+                        configs.seq_len // (configs.down_sampling_window ** i),
+                        configs.pred_len,
+                    )
+                    for i in range(configs.down_sampling_layers + 1)
+                ]
+            )
+
+            if self.channel_independence:
+                self.projection_layer = nn.Linear(
+                    configs.d_model, 1, bias=True)
+            else:
+                self.projection_layer = nn.Linear(
+                    configs.d_model, configs.c_out, bias=True)
+
+                self.out_res_layers = torch.nn.ModuleList([
+                    torch.nn.Linear(
+                        configs.seq_len // (configs.down_sampling_window ** i),
+                        configs.seq_len // (configs.down_sampling_window ** i),
+                    )
+                    for i in range(configs.down_sampling_layers + 1)
+                ])
+
+                self.regression_layers = torch.nn.ModuleList(
+                    [
+                        torch.nn.Linear(
+                            configs.seq_len // (configs.down_sampling_window ** i),
+                            configs.pred_len,
+                        )
+                        for i in range(configs.down_sampling_layers + 1)
+                    ]
+                )
+        self.final_layer = nn.Linear(configs.enc_in, configs.c_out)
+
+
+    def out_projection(self, dec_out, i, out_res):
+        dec_out = self.projection_layer(dec_out)
+        out_res = out_res.permute(0, 2, 1)
+        out_res = self.out_res_layers[i](out_res)
+        out_res = self.regression_layers[i](out_res).permute(0, 2, 1)
+        dec_out = dec_out + out_res
+        return dec_out
+
+    def pre_enc(self, x_list):
+        if self.channel_independence:
+            return (x_list, None)
+        else:
+            out1_list = []
+            out2_list = []
+            for x in x_list:
+                x_1, x_2 = self.preprocess(x)
+                out1_list.append(x_1)
+                out2_list.append(x_2)
+            return (out1_list, out2_list)
+
+    def __multi_scale_process_inputs(self, x_enc, x_mark_enc):
+        if self.configs.down_sampling_method == 'max':
+            down_pool = torch.nn.MaxPool1d(self.configs.down_sampling_window, return_indices=False)
+        elif self.configs.down_sampling_method == 'avg':
+            down_pool = torch.nn.AvgPool1d(self.configs.down_sampling_window)
+        elif self.configs.down_sampling_method == 'conv':
+            padding = 1 if torch.__version__ >= '1.5.0' else 2
+            down_pool = nn.Conv1d(in_channels=self.configs.enc_in, out_channels=self.configs.enc_in,
+                                  kernel_size=3, padding=padding,
+                                  stride=self.configs.down_sampling_window,
+                                  padding_mode='circular',
+                                  bias=False)
+        else:
+            return x_enc, x_mark_enc
+        # B,T,C -> B,C,T
+        x_enc = x_enc.permute(0, 2, 1)
+
+        x_enc_ori = x_enc
+        x_mark_enc_mark_ori = x_mark_enc
+
+        x_enc_sampling_list = []
+        x_mark_sampling_list = []
+        x_enc_sampling_list.append(x_enc.permute(0, 2, 1))
+        x_mark_sampling_list.append(x_mark_enc)
+
+        for i in range(self.configs.down_sampling_layers):
+            x_enc_sampling = down_pool(x_enc_ori)
+
+            x_enc_sampling_list.append(x_enc_sampling.permute(0, 2, 1))
+            x_enc_ori = x_enc_sampling
+
+            if x_mark_enc is not None:
+                x_mark_sampling_list.append(x_mark_enc_mark_ori[:, ::self.configs.down_sampling_window, :])
+                x_mark_enc_mark_ori = x_mark_enc_mark_ori[:, ::self.configs.down_sampling_window, :]
+
+        x_enc = x_enc_sampling_list
+        x_mark_enc = x_mark_sampling_list if x_mark_enc is not None else None
+
+        return x_enc, x_mark_enc
+    
+    def future_multi_mixing(self, B, enc_out_list, x_list):
+        dec_out_list = []
+        if self.channel_independence:
+            x_list = x_list[0]
+            for i, enc_out in zip(range(len(x_list)), enc_out_list):
+                dec_out = self.predict_layers[i](enc_out.permute(0, 2, 1)).permute(
+                    0, 2, 1)  # align temporal dimension
+                dec_out = self.projection_layer(dec_out)
+                dec_out = dec_out.reshape(B, self.configs.c_out, self.pred_len).permute(0, 2, 1).contiguous()
+                dec_out_list.append(dec_out)
+
+        else:
+            for i, enc_out, out_res in zip(range(len(x_list[0])), enc_out_list, x_list[1]):
+                dec_out = self.predict_layers[i](enc_out.permute(0, 2, 1)).permute(
+                    0, 2, 1)  # align temporal dimension
+                dec_out = self.out_projection(dec_out, i, out_res)
+                dec_out_list.append(dec_out)
+
+        return dec_out_list
+
+    def forecast(self, x_enc, x_mark_enc=None):
+
+        x_enc, x_mark_enc = self.__multi_scale_process_inputs(x_enc, x_mark_enc)
+
+        x_list = []
+        x_mark_list = []
+        if x_mark_enc is not None:
+            for i, x, x_mark in zip(range(len(x_enc)), x_enc, x_mark_enc):
+                B, T, N = x.size()
+                x = self.normalize_layers[i](x, 'norm')
+                if self.channel_independence:
+                    x = x.permute(0, 2, 1).contiguous().reshape(B * N, T, 1)
+                    x_list.append(x)
+                    x_mark = x_mark.repeat(N, 1, 1)
+                    x_mark_list.append(x_mark)
+                else:
+                    x_list.append(x)
+                    x_mark_list.append(x_mark)
+        else:
+            for i, x in zip(range(len(x_enc)), x_enc, ):
+                B, T, N = x.size()
+                x = self.normalize_layers[i](x, 'norm')
+                if self.channel_independence:
+                    x = x.permute(0, 2, 1).contiguous().reshape(B * N, T, 1)
+                x_list.append(x)
+
+        # embedding
+        enc_out_list = []
+        x_list = self.pre_enc(x_list)
+        if x_mark_enc is not None:
+            for i, x, x_mark in zip(range(len(x_list[0])), x_list[0], x_mark_list):
+                enc_out = self.enc_embedding(x, x_mark)  # [B,T,C]
+                enc_out_list.append(enc_out)
+        else:
+            for i, x in zip(range(len(x_list[0])), x_list[0]):
+                enc_out = self.enc_embedding(x, None)  # [B,T,C]
+                enc_out_list.append(enc_out)
+
+        # Past Decomposable Mixing as encoder for past
+        for i in range(self.layer):
+            enc_out_list = self.pdm_blocks[i](enc_out_list)
+
+        # Future Multipredictor Mixing as decoder for future
+        dec_out_list = self.future_multi_mixing(B, enc_out_list, x_list)
+
+        dec_out = torch.stack(dec_out_list, dim=-1).sum(-1)
+        dec_out = self.normalize_layers[0](dec_out, 'denorm')
+        return dec_out
+
+    def forward(self, x_enc, x_mark_enc = None, mask=None):
+        if self.task_name == 'long_term_forecast' or self.task_name == 'short_term_forecast':
+            dec_out = self.forecast(x_enc, x_mark_enc)
+            dec_out = self.final_layer(dec_out).squeeze()
+            # print('TimeMixer output shape:', dec_out.shape)
+            return dec_out, dec_out
+        else:
+            raise ValueError('Other tasks implemented yet')
+        
+
+### implementation of PatchTST model
+
+class Transpose(nn.Module):
+    def __init__(self, *dims, contiguous=False): 
+        super().__init__()
+        self.dims, self.contiguous = dims, contiguous
+    def forward(self, x):
+        if self.contiguous: return x.transpose(*self.dims).contiguous()
+        else: return x.transpose(*self.dims)
+
+
+class FlattenHead(nn.Module):
+    def __init__(self, n_vars, nf, target_window, head_dropout=0):
+        super().__init__()
+        self.n_vars = n_vars
+        self.flatten = nn.Flatten(start_dim=-2)
+        self.linear = nn.Linear(nf, target_window)
+        self.dropout = nn.Dropout(head_dropout)
+
+    def forward(self, x):  # x: [bs x nvars x d_model x patch_num]
+        x = self.flatten(x)
+        x = self.linear(x)
+        x = self.dropout(x)
+        return x
+
+
+class PatchTST(nn.Module):
+    """
+    Paper link: https://arxiv.org/pdf/2211.14730.pdf
+    """
+
+    def __init__(self, configs, patch_len=16, stride=8):
+        """
+        patch_len: int, patch len for patch_embedding
+        stride: int, stride for patch_embedding
+        """
+        super().__init__()
+        self.task_name = configs.task_name
+        self.seq_len = configs.seq_len
+        self.pred_len = configs.pred_len
+        padding = stride
+
+        # patching and embedding
+        self.patch_embedding = PatchEmbedding(
+            configs.d_model, patch_len, stride, padding, configs.dropout)
+
+        # Encoder
+        self.encoder = Encoder(
+            [
+                EncoderLayer(
+                    AttentionLayer(
+                        FullAttention(False, configs.factor, attention_dropout=configs.dropout,
+                                      output_attention=False), configs.d_model, configs.n_heads),
+                    configs.d_model,
+                    configs.d_ff,
+                    dropout=configs.dropout,
+                    activation=configs.activation
+                ) for l in range(configs.e_layers)
+            ],
+            norm_layer=nn.Sequential(Transpose(1,2), nn.BatchNorm1d(configs.d_model), Transpose(1,2))
+        )
+
+        # Prediction Head
+        self.head_nf = configs.d_model * \
+                       int((configs.seq_len - patch_len) / stride + 2)
+        if self.task_name == 'long_term_forecast' or self.task_name == 'short_term_forecast':
+            self.head = FlattenHead(configs.enc_in, self.head_nf, configs.pred_len,
+                                    head_dropout=configs.dropout)
+        else:
+            raise ValueError('Only forecast task are supported yet!')
+        
+        self.final_layer = nn.Linear(configs.enc_in, configs.c_out)
+
+    def forecast(self, x_enc):
+        # Normalization from Non-stationary Transformer
+        means = x_enc.mean(1, keepdim=True).detach()
+        x_enc = x_enc - means
+        stdev = torch.sqrt(
+            torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5)
+        x_enc /= stdev
+
+        # do patching and embedding
+        x_enc = x_enc.permute(0, 2, 1)
+        # u: [bs * nvars x patch_num x d_model]
+        enc_out, n_vars = self.patch_embedding(x_enc)
+
+        # Encoder
+        # z: [bs * nvars x patch_num x d_model]
+        enc_out, attns = self.encoder(enc_out)
+        # z: [bs x nvars x patch_num x d_model]
+        enc_out = torch.reshape(
+            enc_out, (-1, n_vars, enc_out.shape[-2], enc_out.shape[-1]))
+        # z: [bs x nvars x d_model x patch_num]
+        enc_out = enc_out.permute(0, 1, 3, 2)
+
+        # Decoder
+        dec_out = self.head(enc_out)  # z: [bs x nvars x target_window]
+        dec_out = dec_out.permute(0, 2, 1)
+
+        # De-Normalization from Non-stationary Transformer
+        dec_out = dec_out * \
+                  (stdev[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
+        dec_out = dec_out + \
+                  (means[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
+        return dec_out
+
+    def forward(self, x_enc, mask=None):
+        if self.task_name == 'long_term_forecast' or self.task_name == 'short_term_forecast':
+            dec_out = self.forecast(x_enc)
+            dec_out = self.final_layer(dec_out).squeeze()
+            return dec_out[:, -self.pred_len:], dec_out  # [B, L, D]
+        return None
+
+
+### implementation of P-sLSTM model
+from einops import rearrange
+
+from xlstm.xlstm_block_stack import xLSTMBlockStack, xLSTMBlockStackConfig
+from xlstm.blocks.slstm.block import sLSTMBlockConfig
+from xlstm.blocks.slstm.layer import sLSTMLayerConfig
+from xlstm.components.feedforward import FeedForwardConfig
+
+class P_sLSTM(nn.Module):
+
+    def __init__(self, configs):
+        super(P_sLSTM, self).__init__()
+        self.seq_len = configs.seq_len
+        self.pred_len = configs.pred_len
+        self.channel = configs.channel
+        self.embedding_dim = configs.embedding_dim
+        self.patch_size = configs.patch_size  # patch size
+        self.stride = configs.stride  # the stride
+        self.patch_num = (configs.seq_len - self.patch_size) // self.stride + 1  # the number of patches
+
+        # xLSTM configuration
+        cfg = xLSTMBlockStackConfig(
+            # mlstm_block=mLSTMBlockConfig(
+            #     mlstm=mLSTMLayerConfig(conv1d_kernel_size=configs.conv1d_kernel_size, 
+            #                            qkv_proj_blocksize=4, num_heads=configs.num_heads)
+            # ),
+            slstm_block=sLSTMBlockConfig(
+                slstm=sLSTMLayerConfig(num_heads=configs.num_heads, 
+                                       conv1d_kernel_size=configs.conv1d_kernel_size,
+                                       bias_init="powerlaw_blockdependent"),
+                feedforward=FeedForwardConfig(proj_factor=1.3, act_fn="gelu"),
+            ),
+            context_length=self.seq_len,
+            num_blocks=configs.num_blocks,
+            embedding_dim=configs.embedding_dim,
+            slstm_at="all"
+        )
+
+        self.embedding = nn.Linear(self.patch_size, self.embedding_dim)  
+        self.xlstm_stack = xLSTMBlockStack(cfg)
+        self.projection = nn.Linear(self.embedding_dim * self.patch_num, self.pred_len)  
+
+    def forward(self, x):
+
+        # x: [Batch, Input length, Channel]
+        B, L, C = x.shape
+
+        # Rearrange dimensions 
+        x = rearrange(x, 'b l c -> b c l')
+
+        # Create patches
+        x = rearrange(x, 'b c l -> (b c) l')  # [(B * C), Num_patches, Patch_size]
+        x = x.unfold(dimension=-1, size=self.patch_size, step=self.stride)  # [(B * C), Num_patches, Patch_size]
+
+        x = self.embedding(x)  # [(B * C), Num_patches, Embedding_dim]
+
+        x = self.xlstm_stack(x)  # [(B * C), Num_patches, Embedding_dim]
+
+        x = x.flatten(1)  # [(B * C), Num_patches * Embedding_dim]
+
+        x = self.projection(x)  # [(B * C), Pred_len]
+
+        # Reshape back to b c l
+        x = rearrange(x, '(b c) l -> b c l', b=B, c=C)  # [B, C, Pred_len]
+
+        # Reshape from b c l to b l c
+        x = rearrange(x, 'b c l -> b l c')  # [B, Pred_len, C]
+        print('P-sLSTM output shape:', x.shape)
+
+        return x
