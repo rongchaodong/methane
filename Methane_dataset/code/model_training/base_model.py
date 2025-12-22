@@ -2,13 +2,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import argparse
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 import math
 import logging
 from sklearn.metrics import mean_squared_error, r2_score
 from config import Config
 from model import LSTM, MyEALSTM, MultiTCN, Transformer, iTransformer, Pyraformer, TSMixer, TimeMixer, PatchTST, P_sLSTM, DUET
-from train_learnable_hierarchical_fluxnet import FluxnetBaselineDataset
+from dataset import FluxnetBaselineDataset, TemporalDataset, FluxnetHierarchicalDataset, HierarchicalTemporalDataset
 
 
 config = Config()
@@ -25,79 +25,6 @@ args = parser.parse_args()
 
 config.num_context_years = args.context
 
-
-class Dataset(Dataset):
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-
-    def __len__(self):
-        return len(self.y)
-
-    def __getitem__(self, idx):
-        return self.x[idx], self.y[idx]
-
-class TemporalDataset(Dataset):
-    def __init__(self, years, data_source: str):
-        self.years = years
-        self.year_to_idx = {year: i for i, year in enumerate(range(1979, 1979 + config.max_num_years))}
-        if args.data_type == "seq":
-            if data_source == "full":
-                self.input_files = [f"../../processed_data/TEM-MDM/full/temporal/input_{year}.npy" for year in years]
-                self.output_files = [f"../../processed_data/TEM-MDM/full/temporal/output_{year}.npy" for year in years]
-            elif data_source == "seq":
-                self.input_files = [f"../../processed_data/TEM-MDM/sequence/temporal/input_{year}.npy" for year in years]
-                self.output_files = [f"../../processed_data/TEM-MDM/sequence/temporal/output_{year}.npy" for year in years]
-        elif args.data_type == "random":
-            self.input_files = [f"../../processed_data/TEM-MDM/temporal/input_{year}.npy" for year in years]
-            self.output_files = [f"../../processed_data/TEM-MDM/temporal/output_{year}.npy" for year in years]
-        self.data_lengths = [np.load(f, mmap_mode='r').shape[0] for f in self.input_files] 
-        self.cumsum_lengths = np.cumsum([0] + self.data_lengths)  
-        self.mean_vals = np.load('../../data/TEM-MDM/mean_vals.npy')
-        self.std_vals = np.load('../../data/TEM-MDM/std_vals.npy')
-
-    def __len__(self):
-        return self.cumsum_lengths[-1]  
-
-    def __getitem__(self, idx):
-        year_idx = np.searchsorted(self.cumsum_lengths, idx, side="right") - 1
-        file_idx = idx - self.cumsum_lengths[year_idx]
-
-        # actual_year = self.years[year_idx]
-        # global_year_idx = self.year_to_idx[actual_year]
-
-        input_data = (np.load(self.input_files[year_idx], mmap_mode='r')[file_idx] - self.mean_vals) / self.std_vals 
-        output_data = np.load(self.output_files[year_idx], mmap_mode='r')[file_idx] / 23
-
-        return torch.tensor(input_data, dtype=torch.float32).to(config.device), torch.tensor(output_data, dtype=torch.float32).to(config.device)
-
-    def __init__(self, years, folds):
-        self.years = years
-        self.folds = folds 
-        self.device = config.device
-        if args.data_type == "seq":
-            self.input_files = [f"../../processed_data/TEM-MDM/sequence/spatial/input_{year}_{fold}.npy" for year in years for fold in folds]
-            self.output_files = [f"../../processed_data/TEM-MDM/sequence/spatial/output_{year}_{fold}.npy" for year in years for fold in folds]
-        elif args.data_type == "random":
-            self.input_files = [f"../../processed_data/TEM-MDM/spatial/input_{year}_{fold}.npy" for year in years for fold in folds]
-            self.output_files = [f"../../processed_data/TEM-MDM/spatial/output_{year}_{fold}.npy" for year in years for fold in folds]
-        self.data_lengths = [np.load(f, mmap_mode='r').shape[0] for f in self.input_files]
-        self.cumsum_lengths = np.cumsum([0] + self.data_lengths)
-
-        self.mean_vals = np.load('../../data/TEM-MDM/mean_vals.npy')
-        self.std_vals = np.load('../../data/TEM-MDM/std_vals.npy')
-
-    def __len__(self):
-        return self.cumsum_lengths[-1]
-
-    def __getitem__(self, idx):
-        file_idx = np.searchsorted(self.cumsum_lengths, idx, side="right") - 1
-        sample_idx = idx - self.cumsum_lengths[file_idx]
-
-        input_data = (np.load(self.input_files[file_idx], mmap_mode='r')[sample_idx] - self.mean_vals) / self.std_vals
-        output_data = np.load(self.output_files[file_idx], mmap_mode='r')[sample_idx] / 23
-
-        return torch.tensor(input_data, dtype=torch.float32).to(self.device), torch.tensor(output_data, dtype=torch.float32).to(self.device)
 
 logging.basicConfig(
     filename=f"log/{args.data_type}_{args.model}.log" if args.simulated else f"log/base_obs_{args.model}.log", 
@@ -225,10 +152,10 @@ def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: Data
 def main():
     if args.simulated:
         train_years = range(1979, 1999)
-        train_dataset = TemporalDataset(train_years, "seq")
+        train_dataset = TemporalDataset(train_years, config)
         train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
         test_years = range(1999, 2019)
-        test_dataset = TemporalDataset(test_years, "seq")
+        test_dataset = TemporalDataset(test_years, config)
         test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
         obs_train(args.epoch, train_dataloader, test_dataloader)
     else: # fluxnet 

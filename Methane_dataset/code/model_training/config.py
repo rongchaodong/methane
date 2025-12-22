@@ -63,10 +63,9 @@ class Config:
         self.k = 1
 
 
-        # --- NEW: Hierarchical Model Config ---
+        # --- Hierarchical Model Config ---
         self.max_num_years = 40  
-        self.meta_n_heads = 1      
-        self.meta_num_layers = 1  
-        self.att_inter_years = 2
+        self.data_source = 'seq'
+        self.data_type = 'seq'
 
         self.num_context_years = 4
