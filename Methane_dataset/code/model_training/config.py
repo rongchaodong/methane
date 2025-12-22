@@ -54,6 +54,15 @@ class Config:
         self.num_blocks = 2
         self.num_heads = 4
 
+        # DUET
+        self.CI = 0  # Channel Independence: 0->False, 1->True
+        self.fc_dropout = 0.1
+        self.num_experts = 2
+        self.output_attention = False
+        self.noisy_gating = True
+        self.k = 1
+
+
         # --- NEW: Hierarchical Model Config ---
         self.max_num_years = 40  
         self.meta_n_heads = 1      

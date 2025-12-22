@@ -7,7 +7,7 @@ import math
 import logging
 from sklearn.metrics import mean_squared_error, r2_score
 from config import Config
-from model import LSTM, MyEALSTM, MultiTCN, Transformer, iTransformer, Pyraformer, TSMixer, TimeMixer, PatchTST, P_sLSTM
+from model import LSTM, MyEALSTM, MultiTCN, Transformer, iTransformer, Pyraformer, TSMixer, TimeMixer, PatchTST, P_sLSTM, DUET
 from train_learnable_hierarchical_fluxnet import FluxnetBaselineDataset
 
 
@@ -129,6 +129,8 @@ elif args.model == 'patchtst':
     model = PatchTST(config).to(config.device)
 elif args.model == 'pslstm':
     model = P_sLSTM(config).to(config.device)
+elif args.model == 'duet':
+    model = DUET(config).to(config.device)
 
 if args.model == 'hierarchy' and args.data_type == "random" and not args.simulated:
     print("cannot train hierarchy model in random dataset!")
@@ -157,10 +159,10 @@ def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: Data
         for batch_X, batch_y in train_dataloader:
             if torch.isnan(batch_X).any():
                 continue
-            print("batch_X shape:", batch_X.shape)
+            # print("batch_X shape:", batch_X.shape)
             _, prediction = model(batch_X)
             # print("prediction shape:", prediction.shape)
-            exit()
+            # exit()
 
             loss = criterion(prediction, batch_y)
 
