@@ -927,7 +927,8 @@ class P_sLSTM(nn.Module):
             slstm_block=sLSTMBlockConfig(
                 slstm=sLSTMLayerConfig(num_heads=configs.num_heads, 
                                        conv1d_kernel_size=configs.conv1d_kernel_size,
-                                       bias_init="powerlaw_blockdependent"),
+                                       bias_init="powerlaw_blockdependent",
+                                       backend="vanilla"),
                 feedforward=FeedForwardConfig(proj_factor=1.3, act_fn="gelu"),
             ),
             context_length=self.seq_len,
@@ -939,6 +940,7 @@ class P_sLSTM(nn.Module):
         self.embedding = nn.Linear(self.patch_size, self.embedding_dim)  
         self.xlstm_stack = xLSTMBlockStack(cfg)
         self.projection = nn.Linear(self.embedding_dim * self.patch_num, self.pred_len)  
+        self.final_layer = nn.Linear(configs.channel, configs.c_out)
 
     def forward(self, x):
 
@@ -965,6 +967,7 @@ class P_sLSTM(nn.Module):
 
         # Reshape from b c l to b l c
         x = rearrange(x, 'b c l -> b l c')  # [B, Pred_len, C]
-        print('P-sLSTM output shape:', x.shape)
+        x = self.final_layer(x).squeeze()  # [B, Pred_len, c_out]
+        # print('P-sLSTM output shape:', x.shape)
 
-        return x
+        return x, x
