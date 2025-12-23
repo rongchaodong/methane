@@ -10,6 +10,7 @@ from config import Config
 from learnable_hierarchical import LearnableHierarchicalWrapper, FluxnetHierarchicalDataset
 from model import LSTM
 import os, pickle
+from lstm_embedding import LSTM_Embedding
 
 config = Config()
 criterion = nn.MSELoss()
@@ -247,7 +248,19 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
 
 def main():
     global model, optimizer, scheduler
-    
+    if args.model == 'lstm_embedding':
+        model = LSTM_Embedding(config).to(config.device)
+        train_dataset = FluxnetHierarchicalDataset(config, mode='train')
+        test_dataset = FluxnetHierarchicalDataset(config, mode='test')
+        
+        train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+        test_dataloader = DataLoader(test_dataset, batch_size=4, shuffle=False)
+        
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=100)
+        
+        train_learnable_hierarchical(args.epoch, train_dataloader, test_dataloader, model, optimizer, scheduler)
+        return
     # FLUXNET data
     if args.type == "temporal":
         
