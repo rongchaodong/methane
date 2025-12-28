@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -78,12 +79,23 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
             if torch.isnan(batch_x_current).any():
                 continue
             
-            predictions, total_loss, inner_loss, contrastive_loss = model(
-                batch_x_current, 
-                batch_historical_inputs, 
-                batch_file_idx,
-                batch_historical_targets
-            )
+            if args.model == "lstm_embedding":
+                predictions, _ = model(
+                    batch_x_current, 
+                    batch_historical_inputs, 
+                    batch_file_idx,
+                    batch_historical_targets
+                )
+                total_loss = torch.tensor(0.0).to(config.device)
+                inner_loss = torch.tensor(0.0).to(config.device)
+                contrastive_loss = torch.tensor(0.0).to(config.device)
+            else:
+                predictions, total_loss, inner_loss, contrastive_loss = model(
+                    batch_x_current, 
+                    batch_historical_inputs, 
+                    batch_file_idx,
+                    batch_historical_targets
+                )
             
             main_loss = criterion(predictions, batch_y)
             total_loss = main_loss + total_loss
@@ -109,11 +121,19 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
         
         with torch.no_grad():
             for batch_x_current, batch_historical_inputs, batch_y, batch_historical_targets, batch_file_idx in test_dataloader:
-                predictions, _, _, _ = model(
-                    batch_x_current, 
-                    batch_historical_inputs, 
-                    batch_file_idx,
-                    batch_historical_targets
+                if args.model == "lstm_embedding":
+                    predictions, _ = model(
+                        batch_x_current, 
+                        batch_historical_inputs, 
+                        batch_file_idx,
+                        batch_historical_targets
+                    )
+                else:
+                    predictions, _, _, _ = model(
+                        batch_x_current, 
+                        batch_historical_inputs, 
+                        batch_file_idx,
+                        batch_historical_targets
                 )
                 # predictions = predictions * train_dataloader.dataset.y_std + train_dataloader.dataset.y_mean
                 predictions_log = predictions.cpu().numpy() * train_dataloader.dataset.y_std + train_dataloader.dataset.y_mean
@@ -141,11 +161,13 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
             record_param = model.state_dict()
             best_nrmse = nrmse
             best_r2 = r2
+            output_dir = f'../model_save/{args.model}'
+            os.makedirs(output_dir, exist_ok=True)
             time.sleep(1)
             if args.pretrained:
-                torch.save(record_param, f'../model_save/hierarchical/base_fine_tuned.pth')
+                torch.save(record_param, f'../model_save/{args.model}/base_fine_tuned.pth')
             else:
-                torch.save(record_param, f'../model_save/hierarchical/base_obs_norm_le.pth')
+                torch.save(record_param, f'../model_save/{args.model}/base_obs_norm_le.pth')
             logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
         else:
             wait += 1
@@ -160,7 +182,10 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
 def main():
     global model, optimizer, scheduler
     logger.info(f'Training learnable hierarchical fluxnet model with {config.num_context_years} context years')
-        
+    
+    train_dataset = FluxnetHierarchicalDataset(config, mode='train')
+    test_dataset = FluxnetHierarchicalDataset(config, mode='test')
+    
     if args.model == "lstm_embedding":
         model = LSTM_Embedding(config).to(config.device)
     else:
@@ -173,8 +198,6 @@ def main():
             enable_contrastive=True,
             dataset=train_dataset
         ).to(config.device)
-    train_dataset = FluxnetHierarchicalDataset(config, mode='train')
-    test_dataset = FluxnetHierarchicalDataset(config, mode='test')
         
     if args.pretrained:
         pretrained_model_path = '../model_save/hierarchical/base_model-1percent-6.pth'

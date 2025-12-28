@@ -10,6 +10,7 @@ from config import Config
 from learnable_hierarchical import LearnableHierarchicalWrapper, save_location_weights
 from dataset import HierarchicalTemporalDataset
 from lstm_embedding import LSTM_Embedding
+import os
 
 config = Config()
 criterion = nn.MSELoss()
@@ -32,7 +33,7 @@ config.batch_size = args.batch_size
 
 # Setup logging
 logging.basicConfig(
-    filename=f"log/learnable_h_{args.model}_{args.context_years}.log",
+    filename=f"log/ablation_{args.model}.log",
     filemode="a",
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -44,8 +45,8 @@ optimizer = None
 scheduler = None
 
 def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test_dataloader: DataLoader, model, optimizer, scheduler):
-    patience = 10 if args.simulated else 100
-    min_delta = 1e-4 if args.simulated else 1e-5
+    patience = 10
+    min_delta = 1e-4
     wait = 0
     r2_max = -10.0
     
@@ -62,13 +63,24 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
             if torch.isnan(batch_x_current).any():
                 continue
             
-            predictions, total_loss, inner_loss, contrastive_loss = model(
-                batch_x_current, 
-                batch_historical_inputs, 
-                batch_file_idx,
-                batch_historical_targets
-            )
-            
+            if args.model == "lstm_embedding":
+                predictions, _ = model(
+                    batch_x_current, 
+                    batch_historical_inputs, 
+                    batch_file_idx,
+                    batch_historical_targets
+                )
+                total_loss = torch.tensor(0.0).to(config.device)
+                inner_loss = torch.tensor(0.0).to(config.device)
+                contrastive_loss = torch.tensor(0.0).to(config.device)
+            else:
+                predictions, total_loss, inner_loss, contrastive_loss = model(
+                    batch_x_current, 
+                    batch_historical_inputs, 
+                    batch_file_idx,
+                    batch_historical_targets
+                )
+                
             # Compute main task loss
             main_loss = criterion(predictions, batch_y)
             total_loss = main_loss + total_loss
@@ -94,11 +106,19 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
         
         with torch.no_grad():
             for batch_x_current, batch_historical_inputs, batch_y, batch_historical_targets, batch_file_idx in test_dataloader:
-                predictions, _, _, _ = model(
-                    batch_x_current, 
-                    batch_historical_inputs, 
-                    batch_file_idx,
-                    batch_historical_targets
+                if args.model == "lstm_embedding":
+                    predictions, _ = model(
+                        batch_x_current, 
+                        batch_historical_inputs, 
+                        batch_file_idx,
+                        batch_historical_targets
+                    )
+                else:
+                    predictions, _, _, _ = model(
+                        batch_x_current, 
+                        batch_historical_inputs, 
+                        batch_file_idx,
+                        batch_historical_targets
                 )
                 all_predictions.append(predictions.cpu().numpy().reshape(-1))
                 all_targets.append(batch_y.cpu().numpy().reshape(-1))
@@ -116,6 +136,8 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
         
         logger.info(f'LR {current_lr} Testing RMSE {rmse:.4f}, NRMSE {nrmse:.4f}, R2 score {r2:.4f}')
         
+        output_dir = f'../model_save/{args.model}'
+        os.makedirs(output_dir, exist_ok=True)
         # Early stopping check
         if r2 > r2_max + min_delta:
             r2_max = r2
@@ -124,8 +146,7 @@ def train_learnable_hierarchical(epochs: int, train_dataloader: DataLoader, test
             best_nrmse = nrmse
             best_r2 = r2
             
-            torch.save(record_param, f'../model_save/hierarchical/base_model-{args.context_years}.pth')
-            save_location_weights(model, f'../model_save/hierarchical/location_weights-{args.context_years}.pth')
+            torch.save(record_param, f'../model_save/{args.model}/base_model-{args.context_years}.pth')
             logger.info(f"New best model and location weights saved at epoch {epoch} with R2 = {r2:.4f}")
         else:
             wait += 1
@@ -154,6 +175,7 @@ def main():
 
     if args.model == "lstm_embedding":
         model = LSTM_Embedding(config).to(config.device)
+        print("Using LSTM Embedding Model")
     else:
         model = LearnableHierarchicalWrapper(
             input_dim=config.input_size,  # 15 features
@@ -161,7 +183,7 @@ def main():
             daily_hidden_dim=args.daily_hidden_size,
             output_dim=config.output_size,
             inner_loss_weight=args.inner_loss_weight,
-            enable_contrastive=True,
+            enable_contrastive=False,
             dataset=train_dataset
         ).to(config.device)
     

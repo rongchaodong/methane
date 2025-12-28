@@ -214,6 +214,8 @@ class FluxnetHierarchicalDataset(Dataset):
         
         data_dir = '../../processed_data/FLUXNET-CH4/site_centric/'
 
+        self.mean_vals = np.load('../../data/TEM-MDM/mean_vals.npy')
+        self.std_vals = np.load('../../data/TEM-MDM/std_vals.npy')
         self.y_mean = None
         self.y_std = None
         

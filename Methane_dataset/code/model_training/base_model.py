@@ -1,3 +1,4 @@
+import os, time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -7,8 +8,8 @@ import math
 import logging
 from sklearn.metrics import mean_squared_error, r2_score
 from config import Config
-from model import LSTM, MyEALSTM, MultiTCN, Transformer, iTransformer, Pyraformer, TSMixer, TimeMixer, PatchTST, P_sLSTM, DUET
-from dataset import FluxnetBaselineDataset, TemporalDataset, FluxnetHierarchicalDataset, HierarchicalTemporalDataset
+from model import LSTM, Transformer, iTransformer, Pyraformer, TSMixer, TimeMixer, PatchTST, P_sLSTM, DUET
+from dataset import FluxnetBaselineDataset, TemporalDataset
 
 
 config = Config()
@@ -38,10 +39,6 @@ logger = logging.getLogger()
 #model selection
 if args.model == 'lstm':
     model = LSTM(config).to(config.device)
-elif args.model == 'ealstm':
-    model = MyEALSTM(config).to(config.device)
-elif args.model == 'tcn':
-    model = MultiTCN(config).to(config.device)
 elif args.model == 'transformer':
     model = Transformer(config).to(config.device)
 elif args.model == 'itransformer':
@@ -130,13 +127,14 @@ def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: Data
             record_param = model.state_dict()
             best_nrmse = nrmse
             best_r2 = r2
+            output_dir = f'../model_save/{args.model}'
+            os.makedirs(output_dir, exist_ok=True)
             if args.simulated:
                 torch.save(record_param, f'../model_save/{args.model}/base.pth')
                 logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
             else:
-                # import time
-                # time.sleep(1)
-                # torch.save(record_param, f'../model_save/{args.model}/base_obs.pth')
+                time.sleep(1)
+                torch.save(record_param, f'../model_save/{args.model}/base_obs.pth')
                 logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
 
         else:
