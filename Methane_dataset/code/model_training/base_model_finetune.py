@@ -55,7 +55,7 @@ elif args.model == 'pslstm':
 elif args.model == 'duet':
     model = DUET(config).to(config.device)
 
-path = f'../model_save/{args.model}/base_model.pth'
+path = f'../model_save/{args.model}/base.pth'
 model.load_state_dict(torch.load(path, weights_only=True, map_location=config.device))
 
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -124,7 +124,7 @@ def obs_train(epoches : int, train_dataloader: DataLoader, test_dataloader: Data
             output_dir = f'../model_save/{args.model}'
             os.makedirs(output_dir, exist_ok=True)
             time.sleep(1)
-            torch.save(record_param, f'../model_save/{args.model}/base_obs.pth')
+            torch.save(record_param, f'../model_save/{args.model}/base_obs_finetune.pth')
             logger.info(f"New best model saved at epoch {epoch} with R2 = {r2:.4f}")
 
         else:

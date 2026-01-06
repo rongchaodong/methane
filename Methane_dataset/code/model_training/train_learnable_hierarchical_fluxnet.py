@@ -200,7 +200,7 @@ def main():
         ).to(config.device)
         
     if args.pretrained:
-        pretrained_model_path = '../model_save/hierarchical/base_model-1percent-6.pth'
+        pretrained_model_path = '../model_save/learnable_hierarchical/base_model-4.pth'
         model = load_pretrained_model(pretrained_model_path, model)
         logger.info("Loaded pretrained model for fine-tuning.")
         # exit()
