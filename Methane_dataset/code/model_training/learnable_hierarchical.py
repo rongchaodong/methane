@@ -401,12 +401,13 @@ class DailyDecoder(nn.Module):
 
 
 class Hierarchical(nn.Module):
-    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, enable_contrastive=True, dataset=None, pretrained_location_weights=None):
+    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, enable_contrastive=True, dataset=None, pretrained_location_weights=None, enable_attn=False):
         super(Hierarchical, self).__init__()
         self.cross_attn = nn.MultiheadAttention(embed_dim=input_dim, num_heads=1, batch_first=True)
         self.encoder = AnnualEncoder(input_dim, annual_hidden_dim, output_dim, enable_contrastive=enable_contrastive, dataset=dataset, pretrained_location_weights=pretrained_location_weights)
         self.decoder = DailyDecoder(input_dim, daily_hidden_dim, annual_hidden_dim * 2, output_dim)
         self.enable_contrastive = enable_contrastive
+        self.enable_attn = enable_attn
 
     def forward(self, x_current, historical_inputs, file_idx, historical_targets=None, training_inner=True, compute_contrastive=True):
         # x_current: [B, 365, input_size=15] - current year data
@@ -414,11 +415,15 @@ class Hierarchical(nn.Module):
         # file_idx: [B] - location indices for each sample in the batch
         # historical_targets: [B, context_len, 365] - historical target Y for self-supervised learning
         
-        attention_weights = self.cross_attn(
-            query=x_current.mean(dim=1, keepdim=True),  # [B, 1, input_size]
-            key=historical_inputs.mean(dim=2),  # [B, context_len, input_size]
-            value=historical_inputs.mean(dim=2)   # [B, context_len, input_size]
-        )[1].squeeze(1) # [B, context_len]
+        B, context_len, seq_len, input_size = historical_inputs.shape
+        if self.enable_attn:
+            attention_weights = self.cross_attn(
+                query=x_current.mean(dim=1, keepdim=True),  # [B, 1, input_size]
+                key=historical_inputs.mean(dim=2),  # [B, context_len, input_size]
+                value=historical_inputs.mean(dim=2)   # [B, context_len, input_size]
+            )[1].squeeze(1) # [B, context_len]
+        else:
+            attention_weights = torch.full((B, context_len), 1.0 / context_len).to(x_current.device)
         # print("attention weights:", attention_weights)
         # exit()
         # Get annual context, predictions, weights, and attention weights
@@ -462,10 +467,10 @@ class Hierarchical(nn.Module):
 
 class LearnableHierarchicalWrapper(nn.Module):
     """Wrapper class providing second-order gradient support for nested optimization"""
-    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, inner_loss_weight=1.0, enable_contrastive=True, dataset=None, pretrained_location_weights=None):
+    def __init__(self, input_dim, annual_hidden_dim, daily_hidden_dim, output_dim=1, inner_loss_weight=1.0, enable_contrastive=True, dataset=None, pretrained_location_weights=None, enable_attn=False):
         super(LearnableHierarchicalWrapper, self).__init__()
         
-        self.model = Hierarchical(input_dim, annual_hidden_dim, daily_hidden_dim, output_dim, enable_contrastive=enable_contrastive, dataset=dataset, pretrained_location_weights=pretrained_location_weights)
+        self.model = Hierarchical(input_dim, annual_hidden_dim, daily_hidden_dim, output_dim, enable_contrastive=enable_contrastive, dataset=dataset, pretrained_location_weights=pretrained_location_weights, enable_attn=enable_attn)
         self.inner_loss_weight = inner_loss_weight
         self.enable_contrastive = enable_contrastive
         

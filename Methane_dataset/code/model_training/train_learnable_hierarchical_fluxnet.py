@@ -195,7 +195,8 @@ def main():
             daily_hidden_dim=args.daily_hidden_size,
             output_dim=config.output_size,
             inner_loss_weight=args.inner_loss_weight,
-            enable_contrastive=True,
+            enable_contrastive=False,
+            enable_attn=False,
             dataset=train_dataset
         ).to(config.device)
         

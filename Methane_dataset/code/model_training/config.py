@@ -7,6 +7,7 @@ class Config:
         self.enc_in = enc_in
         self.hidden_size = n_hidden
         self.batch_first = True 
+        self.enable_attn = False
         self.num_layers = 3
         self.input_size = 15
         self.output_size = 1

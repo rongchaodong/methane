@@ -61,16 +61,20 @@ class LSTM_Embedding(nn.Module):
         historical_inputs: historical year input data [B, context_len, 365, enc_in]
         '''
         historical_hidden = self.encoder(historical_inputs) # [B, context_len, hidden_size]
-        
-        B, context_len, seq_len, enc_in = historical_inputs.size()
-        q = self.projection(x_current.view(B, 1, -1)) # [B, 1, hidden_size]
-        k = self.projection(historical_inputs.view(B, context_len, -1)) # [B, context_len, hidden_size]
 
-        attn_output, attn_weights = self.multihead_attn(
-            query=q,
-            key=k,
-            value=historical_hidden
-        ) # attn_output: [B, 1, hidden_size], attn_weights: [B, 1, context_len]
+        B, context_len, seq_len, enc_in = historical_inputs.size()
+
+        if self.config.enable_attn:
+            q = self.projection(x_current.view(B, 1, -1)) # [B, 1, hidden_size]
+            k = self.projection(historical_inputs.view(B, context_len, -1)) # [B, context_len, hidden_size]
+
+            attn_output, attn_weights = self.multihead_attn(
+                query=q,
+                key=k,
+                value=historical_hidden
+            ) # attn_output: [B, 1, hidden_size], attn_weights: [B, 1, context_len]
+        else:
+            attn_output = historical_hidden.mean(dim=1, keepdim=True)  # [B, 1, hidden_size]
 
         prediction = self.decoder(x_current, attn_output)
         
