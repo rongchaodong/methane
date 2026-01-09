@@ -2,67 +2,26 @@ import torch
 import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader, Dataset
-from model import LSTM, Transformer
-from hybrid import LSTM_Transformer
-from hierarchical import Hierarchical, HierarchicalTemporalDataset
-from hierarchical_x_y import EnhancedHierarchicalMultiEmbedding
-from hierarchical_x_y import HierarchicalTemporalDataset as hierarchy_temporal_x_y
-from cross_feature_attention import ImprovedCrossFeatureAttentionModel, NoInterGroupModel, NoIntraGroupModel
+from torch.utils.data import DataLoader
+from model import LSTM, Transformer, iTransformer, Pyraformer, TSMixer, TimeMixer, PatchTST, P_sLSTM, DUET
+from dataset import FluxnetBaselineDataset, TemporalDataset, HierarchicalTemporalDataset, FluxnetHierarchicalDataset
+from learnable_hierarchical import LearnableHierarchicalWrapper
+from lstm_embedding import LSTM_Embedding
+# from hierarchical_x_y import EnhancedHierarchicalMultiEmbedding
+# from hierarchical_x_y import HierarchicalTemporalDataset as hierarchy_temporal_x_y
+# from cross_feature_attention import ImprovedCrossFeatureAttentionModel, NoInterGroupModel, NoIntraGroupModel
 import argparse
 import math 
+from sklearn.metrics import mean_squared_error, r2_score
 
 parser = argparse.ArgumentParser(description="draw prediction for models")
 parser.add_argument("--simulated", action="store_true", help="training simulated data or observed data")
 parser.add_argument("--model", type=str, help="Model selection")
-parser.add_argument("--data_type", type=str, default="seq", help="Model selection: random, or seq")
-parser.add_argument("--context", type=int, default=4, help="Length of context year as prior knowledge used in hierarchy model")
 parser.add_argument("--index", type=int, help="print which site")
 args = parser.parse_args()
 
 from config import Config
 config = Config()
-
-class Dataset(Dataset):
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-
-    def __len__(self):
-        return len(self.y)
-
-    def __getitem__(self, idx):
-        return self.x[idx], self.y[idx]
-
-class TemporalDataset(Dataset):
-    def __init__(self, years):
-        self.years = years
-        self.year_to_idx = {year: i for i, year in enumerate(range(1979, 1979 + config.max_num_years))}
-        if args.data_type == "seq":
-            self.input_files = [f"../../processed_data/TEM-MDM/sequence/temporal/input_{year}.npy" for year in years]
-            self.output_files = [f"../../processed_data/TEM-MDM/sequence/temporal/output_{year}.npy" for year in years]
-        elif args.data_type == "random":
-            self.input_files = [f"../../processed_data/TEM-MDM/temporal/input_{year}.npy" for year in years]
-            self.output_files = [f"../../processed_data/TEM-MDM/temporal/output_{year}.npy" for year in years]
-        self.data_lengths = [np.load(f, mmap_mode='r').shape[0] for f in self.input_files] 
-        self.cumsum_lengths = np.cumsum([0] + self.data_lengths)  
-        self.mean_vals = np.load('../../data/TEM-MDM/mean_vals.npy')
-        self.std_vals = np.load('../../data/TEM-MDM/std_vals.npy')
-
-    def __len__(self):
-        return self.cumsum_lengths[-1]  
-
-    def __getitem__(self, idx):
-        year_idx = np.searchsorted(self.cumsum_lengths, idx, side="right") - 1
-        file_idx = idx - self.cumsum_lengths[year_idx]
-
-        # actual_year = self.years[year_idx]
-        # global_year_idx = self.year_to_idx[actual_year]
-
-        input_data = (np.load(self.input_files[year_idx], mmap_mode='r')[file_idx] - self.mean_vals) / self.std_vals 
-        output_data = np.load(self.output_files[year_idx], mmap_mode='r')[file_idx] / 23
-
-        return torch.tensor(input_data, dtype=torch.float32).to(config.device), torch.tensor(output_data, dtype=torch.float32).to(config.device)
 
 def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
     if model_str == "lstm":
@@ -125,7 +84,7 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
             elif model_str == "cross":
                 path = f'../model_save/{model_str}/base_obs_no_intra.pth'
             else:
-                path = f'../model_save/hierarchical/base_lstm.pth'
+                path = f'../model_save/lstm/base.pth'
 
 
         model.load_state_dict(torch.load(path, weights_only=True))
@@ -164,8 +123,7 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
         if model_str == "learnable_hidden_fluxnet":
             test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
         else:
-            from train_learnable_hierarchical_fluxnet import FluxnetBaselineDataset
-            test_dataset = FluxnetBaselineDataset(config, mode='test')
+            test_dataset = FluxnetBaselineDataset(config, mode='train')
             test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     model.eval()
@@ -263,56 +221,137 @@ def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
 
         plt.tight_layout() 
 
-        plt.savefig(f'figure/no_intra_obs_{index}.png')
+        plt.savefig(f'figure/obs_training_all.png')
 
+def draw_historical_sites(site_name):
+    dataset = FluxnetBaselineDataset(config, mode='train')
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
 
-def compare_models_draw(simulated: bool, index: int = 0):
-    """
-    Draw comparison of 5 models: LSTM, Cross (full), No Inter-Group, No Intra-Group, Transformer
-    """
-    model_configs = [
-        # ("lstm", "LSTM", LSTM(config)),
-        ("cross_full", "HCFA", ImprovedCrossFeatureAttentionModel(config)),
-        ("cross_no_inter", "No Inter-Group", NoInterGroupModel(config)),
-        ("cross_no_intra", "No Intra-Group", NoIntraGroupModel(config)),
-        ("transformer", "Transformer", Transformer(config)),
-    ]
+    all_targets = {}
+    for i, (_, batch_y) in enumerate(dataloader):
+        site, year = dataset.samples[i]
+        if site == site_name:
+            all_targets[year] = batch_y.cpu().numpy().reshape(-1)
+    all_colors = [
+        'green',         # 1. 绿色 - LSTM
+        'orange',        # 2. 橙色 - Ps-LSTM
+        'purple',        # 3. 紫色 - transformer
+        'brown',         # 4. 棕色 - iTransformer
+        'pink',          # 5. 粉色 - Pyraformer
+        'gray',          # 6. 灰色 - TSMixer
+        'olive',         # 7. 橄榄色 - TimeMixer
+        'cyan',          # 8. 青色 - PatchTST
+        'gold',          # 9. 金色 - DUET
+        'red'            # 10. 红色 - CHAM-net
+        ]
+    # print(len(all_targets))
+    # exit()
+    assert len(all_targets) < len(all_colors), "Not enough colors for the number of historical sites."
+    plt.figure(figsize=(12, 6))
+    for i, (year, predictions) in enumerate(all_targets.items()):
+        if predictions is not None:
+            plt.plot(predictions, label=f'{site_name}_{year}', linewidth=2, color=all_colors[i], alpha=0.8)
     
+    plt.title(f'Historical Data for Site: {site_name}')
+    plt.xlabel('Day of Year')
+    plt.ylabel('Methane Flux')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f'figure/historical_{site_name}.png')
+
+    
+def compare_models_draw(simulated: bool, index: int = 0):
     # Prepare datasets
     if simulated:
         test_years = range(1999, 2019)
-        test_dataset = TemporalDataset(test_years)
+        test_dataset = TemporalDataset(test_years, config)
         test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
+
+        test_dataset_chamnet = HierarchicalTemporalDataset(test_years, config, range(1979, 2019))
+        test_dataloader_chamnet = DataLoader(test_dataset_chamnet, batch_size=128, shuffle=False)
     else:
-        from train_learnable_hierarchical_fluxnet import FluxnetBaselineDataset
         test_dataset = FluxnetBaselineDataset(config, mode='test')
         test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+        
+        train_dataset = FluxnetHierarchicalDataset(config, mode='train')
+        test_dataset_chamnet = FluxnetHierarchicalDataset(config, mode='test')
+        test_dataloader_chamnet = DataLoader(test_dataset_chamnet, batch_size=1, shuffle=False)
+
+    # best 5 models
+    if simulated:
+        model_configs = [
+            ("lstm", "LSTM", LSTM(config)),
+            # ("transformer", "Transformer", Transformer(config)),
+            # ("pyraformer", "Pyraformer", Pyraformer(config)),
+            ("tsmixer", "TSMixer", TSMixer(config)),
+            ("chamnet", "CHAM-net", LearnableHierarchicalWrapper(
+            input_dim=config.input_size,  
+            annual_hidden_dim=16,
+            daily_hidden_dim=8,
+            output_dim=config.output_size,
+            inner_loss_weight=1.0,
+            enable_contrastive=False,
+            enable_attn=False,
+            dataset=test_dataset_chamnet))
+        ]
+    else:
+        model_configs = [
+            # ("lstm", "LSTM", LSTM(config)),
+            # ("pslstm", "P-sLSTM", P_sLSTM(config)),
+            ("pyraformer", "Pyraformer", Pyraformer(config)),
+            ("tsmixer", "TSMixer", TSMixer(config)),
+            ("chamnet", "CHAM-net", LearnableHierarchicalWrapper(
+            input_dim=config.input_size,  
+            annual_hidden_dim=16,
+            daily_hidden_dim=8,
+            output_dim=config.output_size,
+            inner_loss_weight=1.0,
+            enable_contrastive=False,
+            enable_attn=False,
+            dataset=test_dataset_chamnet))
+        ]
+    all_model_configs = [
+        ("lstm", "LSTM", LSTM(config)),
+        ("pslstm", "P-sLSTM", P_sLSTM(config)),
+        ("transformer", "Transformer", Transformer(config)),
+        ("itransformer", "iTransformer", iTransformer(config)),
+        ("pyraformer", "Pyraformer", Pyraformer(config)),
+        ("tsmixer", "TSMixer", TSMixer(config)),
+        ("timemixer", "TimeMixer", TimeMixer(config)),
+        ("patchtst", "PatchTST", PatchTST(config)),
+        ("duet", "DUET", DUET(config)),
+        ("chamnet", "CHAM-net", LearnableHierarchicalWrapper(
+            input_dim=config.input_size,  
+            annual_hidden_dim=16,
+            daily_hidden_dim=8,
+            output_dim=config.output_size,
+            inner_loss_weight=1.0,
+            enable_contrastive=False,
+            enable_attn=False,
+            dataset=test_dataset_chamnet))
+    ]
+
     
     # Collect predictions for all models
     all_model_predictions = []
     ground_truth = None
     
+    R2_list = []
+    nrmse_list = []
     for model_key, model_name, model in model_configs:
         model = model.to(config.device)
         
         # Load model weights
         try:
             if simulated:
-                if model_key == "cross_full":
-                    path = f'../model_save/cross/base-2.pth'
-                elif model_key == "cross_no_inter":
-                    path = f'../model_save/cross/base_no_inter.pth'
-                elif model_key == "cross_no_intra":
-                    path = f'../model_save/cross/base_no_intra.pth'
+                if model_key == "chamnet":
+                    path = f'../model_save/learnable_hierarchical/base_model-2.pth'
                 else:
                     path = f'../model_save/{model_key}/base.pth'
             else:
-                if model_key == "cross_full":
-                    path = f'../model_save/cross/base_obs-2.pth'
-                elif model_key == "cross_no_inter":
-                    path = f'../model_save/cross/base_obs_no_inter.pth'
-                elif model_key == "cross_no_intra":
-                    path = f'../model_save/cross/base_obs_no_intra.pth'
+                if model_key == "chamnet":
+                    path = f'../model_save/learnable_hierarchical/base_obs_no_attn.pth'
                 else:
                     path = f'../model_save/{model_key}/base_obs.pth'
             
@@ -330,53 +369,108 @@ def compare_models_draw(simulated: bool, index: int = 0):
         
         with torch.no_grad():
             if simulated:
-                for batch_X, batch_y in test_dataloader:
-                    _, prediction = model(batch_X)
-                    predictions_list.append(prediction.cpu().numpy())
-                    targets_list.append(batch_y.cpu().numpy())
-                    break  # Only take first batch for visualization
-                
+                if model_key == "chamnet":
+                    for batch_x_current, batch_historical_inputs, batch_y, batch_historical_targets, batch_file_idx in test_dataloader_chamnet:
+                        if torch.isnan(batch_x_current).any():
+                            continue
+                        predictions, _, _, _ = model(
+                        batch_x_current, 
+                        batch_historical_inputs, 
+                        batch_file_idx,
+                        batch_historical_targets
+                        )
+                        predictions_list.append(predictions.cpu().numpy())
+                        targets_list.append(batch_y.cpu().numpy())
+                        break  # Only take first batch for visualization
+                else:
+                    for batch_X, batch_y in test_dataloader:
+                        _, prediction = model(batch_X)
+                        predictions_list.append(prediction.cpu().numpy())
+                        targets_list.append(batch_y.cpu().numpy())
+                        break  # Only take first batch for visualization
+
                 predictions = predictions_list[0]
                 targets = targets_list[0]
             else:
-                for batch_x, batch_y in test_dataloader:
-                    _, prediction = model(batch_x)
-                    predictions_list.append(prediction.cpu().numpy().reshape(-1))
-                    targets_list.append(batch_y.cpu().numpy().reshape(-1))
+                if model_key == "chamnet":
+                    for batch_x_current, batch_historical_inputs, batch_y, batch_historical_targets, batch_file_idx in test_dataloader_chamnet:
+                        predictions, _, _, _ = model(
+                            batch_x_current, 
+                            batch_historical_inputs, 
+                            batch_file_idx,
+                            batch_historical_targets
+                        )
+                        predictions_log = predictions.cpu().numpy() * train_dataset.y_std + train_dataset.y_mean
+                        predictions = np.sign(predictions_log) * (np.exp(np.abs(predictions_log)) - 1)
+                        predictions_list.append(predictions.reshape(-1))
+                        targets_list.append(batch_y.cpu().numpy().reshape(-1))
+                else:
+                    for batch_x, batch_y in test_dataloader:
+                        _, prediction = model(batch_x)
+                        predictions_list.append(prediction.cpu().numpy().reshape(-1))
+                        targets_list.append(batch_y.cpu().numpy().reshape(-1))
                 
-                predictions = predictions_list[index] if index < len(predictions_list) else predictions_list[0]
-                targets = targets_list[index] if index < len(targets_list) else targets_list[0]
+                predictions = predictions_list[index]
+                targets = targets_list[index]
+                R2 = r2_score(targets, predictions)
+                nrmse = np.sqrt(mean_squared_error(targets, predictions)) / (np.max(targets) - np.min(targets))
+                R2_list.append(R2)
+                nrmse_list.append(nrmse)
         
         all_model_predictions.append((model_name, predictions))
         
         if ground_truth is None:
             ground_truth = targets
     
+    if not simulated:
+        print("R2 scores for models:", R2_list)
+        print("NRMSE scores for models:", nrmse_list)
     # Create comparison plot
     plt.figure(figsize=(14, 6))
     
     # Plot ground truth
     if ground_truth is not None:
         if simulated:
-            plt.plot(ground_truth[index], label='Ground Truth', linewidth=2, color='black', linestyle='--')
+            plt.plot(ground_truth[index], label='Ground Truth', linewidth=3, color='blue', linestyle='solid')
         else:
-            plt.plot(ground_truth, label='Ground Truth', linewidth=2, color='black', linestyle='--')
+            plt.plot(ground_truth, label='Ground Truth', linewidth=3, color='blue', linestyle='solid')
     
     # Plot predictions from all models
-    colors = ['blue', 'green', 'red', 'orange', 'purple']
+    if simulated:
+        colors = ['green', 'purple', 'red']
+    else:
+        colors = ['green', 'purple', 'red']
+    all_colors = [
+        'green',         # 1. 绿色 - LSTM
+        'orange',        # 2. 橙色 - Ps-LSTM
+        'purple',        # 3. 紫色 - transformer
+        'brown',         # 4. 棕色 - iTransformer
+        'pink',          # 5. 粉色 - Pyraformer
+        'gray',          # 6. 灰色 - TSMixer
+        'olive',         # 7. 橄榄色 - TimeMixer
+        'cyan',          # 8. 青色 - PatchTST
+        'gold',          # 9. 金色 - DUET
+        'red'            # 10. 红色 - CHAM-net
+        ]
     for i, (model_name, predictions) in enumerate(all_model_predictions):
         if predictions is not None:
             if simulated:
-                plt.plot(predictions[index], label=model_name, linewidth=1.5, color=colors[i], alpha=0.8)
+                if model_name == "CHAM-net":
+                    plt.plot(predictions[index], label=model_name, linewidth=3, color=colors[i], alpha=0.8)
+                else:
+                    plt.plot(predictions[index], label=model_name, linewidth=2, color=colors[i], alpha=0.8)
             else:
-                plt.plot(predictions, label=model_name, linewidth=1.5, color=colors[i], alpha=0.8)
+                if model_name == "CHAM-net":
+                    plt.plot(predictions, label=model_name, linewidth=3, color=colors[i], alpha=0.8)
+                else:
+                    plt.plot(predictions, label=model_name, linewidth=2, color=colors[i], alpha=0.8)
     
     # Add title based on dataset type
     if simulated:
-        plt.title(f'Model Comparison - Simulated Data (Index {index})', fontsize=14, fontweight='bold')
+        plt.title(f'TEM dataset', fontsize=14, fontweight='bold')
     else:
         site, year = test_dataset.samples[index]
-        plt.title(f'Model Comparison - Observed Data: {site} ({year})', fontsize=14, fontweight='bold')
+        plt.title(f'FLUXNET dataset: {site} ({year})', fontsize=14, fontweight='bold')
     
     plt.xlabel('Day of Year', fontsize=12)
     plt.ylabel('CH4 Emissions', fontsize=12)
@@ -386,18 +480,34 @@ def compare_models_draw(simulated: bool, index: int = 0):
     
     # Save figure
     if simulated:
-        plt.savefig(f'figure/simulated_idx{index}.png', dpi=300)
-        print(f"Saved: figure/model_comparison_simulated_idx{index}.png")
+        plt.savefig(f'figure/TEM_{index}.png', dpi=300)
+        print(f"Saved: figure/TEM_{index}.png")
     else:
-        plt.savefig(f'figure/model_comparison_obs_idx{index}.png', dpi=300)
-        print(f"Saved: figure/obs_idx{index}.png")
+        plt.savefig(f'figure/FLUXNET_{index}.png', dpi=300)
+        print(f"Saved: figure/FLUXNET_{index}.png")
     
     plt.close()
 
+draw_historical_sites("DE.SfN")
+draw_historical_sites("FI.Lom")
+draw_historical_sites("US.Los")
 
 # Draw comparisons for both simulated and observed data
-print("Drawing simulated data comparison (index=0)...")
-compare_models_draw(simulated=True, index=0)
+# print("Drawing simulated data comparison (index=0)...")
+# for i in range(19):
+#     compare_models_draw(simulated=True, index=i)
+# compare_models_draw(simulated=True, index=19)
 
-print("\nDrawing observed data comparison (index=3)...")
-compare_models_draw(simulated=False, index=0)
+# best 14
+
+# print("\nDrawing observed data comparison (index=3)...")
+# for i in range(19):
+#     compare_models_draw(simulated=False, index=i)
+# compare_models_draw(simulated=False, index=18)
+
+# best index: 0 1 2 3 4 5 6 8 10 12 14 15 
+# choose 14 for now, seems good [0.23908430337905884, -3.834561347961426, 0.4589861035346985, 0.44660162925720215, 0.5736039876937866] NRMSE: [np.float64(0.13204366874958218), np.float64(0.3328341164403951), np.float64(0.11134058880052077), np.float64(0.11260774315247449), np.float64(0.09884526203298415)]
+# choose 4, and 2, pattern and scale
+
+
+# yearly_draw("lstm", False, 4, 0)
