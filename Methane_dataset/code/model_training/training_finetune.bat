@@ -1,3 +1,4 @@
+@echo off
 echo activating conda 'methane'...
 call conda activate methane
 
@@ -9,41 +10,17 @@ if %errorlevel% neq 0 (
 echo activating done.
 echo.
 
-echo training lstm ---
-python .\base_model_finetune.py --model lstm
-echo.
+for %%m in (lstm pslstm transformer pyraformer itransformer tsmixer timemixer duet patchtst) do (
+    echo training %%m ---
+    for /L %%i in (1,1,3) do (
+        python .\base_model_finetune.py --model %%m
+    )
+    echo.
+)
 
-echo training pslstm ---
-python .\base_model_finetune.py --model pslstm
-echo.
-
-echo training transformer ---
-python .\base_model_finetune.py --model transformer
-echo.
-
-
-echo training pyraformer ---
-python .\base_model_finetune.py --model pyraformer
-echo.
-
-echo training itransformer ---
-python .\base_model_finetune.py --model itransformer
-echo.
-
-echo training tsmixer ---
-python .\base_model_finetune.py --model tsmixer
-echo.
-
-echo training timemixer ---
-python .\base_model_finetune.py --model timemixer
-echo.
-
-echo training duet ---
-python .\base_model_finetune.py --model duet
-echo.
-
-echo training patchtst ---
-python .\base_model_finetune.py --model patchtst
-echo.
+echo training hierarchy ---
+for /L %%i in (1,1,3) do (
+    python train_learnable_hierarchical_fluxnet_finetune.py --pretrained
+)
 
 call conda deactivate

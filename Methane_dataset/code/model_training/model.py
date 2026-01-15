@@ -894,6 +894,8 @@ class PatchTST(nn.Module):
         if self.task_name == 'long_term_forecast' or self.task_name == 'short_term_forecast':
             dec_out = self.forecast(x_enc)
             dec_out = self.final_layer(dec_out).squeeze()
+            if dec_out.dim() == 1:
+                dec_out = dec_out.unsqueeze(0)
             return dec_out[:, -self.pred_len:], dec_out  # [B, L, D]
         return None
 

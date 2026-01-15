@@ -23,205 +23,8 @@ args = parser.parse_args()
 from config import Config
 config = Config()
 
-def yearly_draw(model_str: str, simulated: bool, year: int = 4, index: int = 0):
-    if model_str == "lstm":
-        model = LSTM(config).to(config.device)
-    elif model_str == "transformer":
-        model = Transformer(config).to(config.device)
-    elif model_str == "hybrid":
-        model = LSTM_Transformer(config).to(config.device)
-    elif model_str == "hierarchy":
-        model = Hierarchical(10, 8, 5, 8, 1).to(config.device)
-    elif model_str == "mul-emb":
-        model = EnhancedHierarchicalMultiEmbedding(11, 8, 5, 8, 1).to(config.device)
-    elif model_str == "cross":
-        # model = ImprovedCrossFeatureAttentionModel(config).to(config.device)
-        model = NoIntraGroupModel(config).to(config.device)
-    elif model_str == "learnable_hidden_lstm":
-        from learnable_hidden_state_lstm import LearnableHiddenStateLSTMWrapper
-        model = LearnableHiddenStateLSTMWrapper(
-            input_size=config.input_size,
-            hidden_size=8,
-            output_size=config.output_size,
-            historical_years=2,
-            inner_model_type="lstm",
-            num_layers=1,
-            inner_loss_weight=1.0,
-        ).to(config.device)
-    elif model_str == "learnable_hidden_fluxnet":
-        from learnable_hierarchical import LearnableHierarchicalWrapper, FluxnetHierarchicalDataset
-        train_dataset = FluxnetHierarchicalDataset(config, mode='train')
-        test_dataset = FluxnetHierarchicalDataset(config, mode='test')
-        model = LearnableHierarchicalWrapper(
-            input_dim=config.input_size,  # 15 features
-            annual_hidden_dim=16,
-            daily_hidden_dim=8,
-            output_dim=config.output_size,
-            inner_loss_weight=1.0,
-            enable_contrastive=True,
-            dataset=train_dataset
-        ).to(config.device)
-
-    try:
-        if simulated:
-             if model_str == "hierarchy":
-                path = f'../model_save/{model_str}/base-{year}.pth'
-             elif model_str == "mul-emb":
-                path = f'../model_save/{model_str}/base-{year}.pth'
-             elif model_str == "learnable_hidden_lstm":
-                path = f'../model_save/{model_str}/base_lstm.pth'
-             else:
-                path = f'../model_save/{model_str}/base_no_intra.pth'
-        else:
-            if model_str == "hierarchy":
-                path = f'../model_save/{model_str}/base_obs-{year}.pth'
-            elif model_str == "mul-emb":
-                path = f'../model_save/{model_str}/base_obs-{year}.pth'
-            elif model_str == "learnable_hidden_lstm":
-                path = f'../model_save/{model_str}/base_obs_lstm.pth' 
-            elif model_str == "learnable_hidden_fluxnet":
-                path = f'../model_save/hierarchical/base_obs_norm.pth'
-            elif model_str == "cross":
-                path = f'../model_save/{model_str}/base_obs_no_intra.pth'
-            else:
-                path = f'../model_save/lstm/base.pth'
-
-
-        model.load_state_dict(torch.load(path, weights_only=True))
-    except FileNotFoundError:
-        print(path)
-        print(f"cannot find {path} the model!")
-        exit()
-
-    if simulated:
-        test_years = range(1999, 2019)
-        if model_str == "hierarchy":
-            all_years = range(1979, 2019)
-            test_dataset = HierarchicalTemporalDataset(test_years, config, all_years, "seq")
-            test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
-        elif model_str == "mul-emb":
-            all_years = range(1979, 2019)
-            test_dataset = hierarchy_temporal_x_y(test_years, config, all_years, "seq")
-            test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
-        elif model_str == "learnable_hidden_lstm":
-            all_years = range(1979, 2019)
-            from train_learnable_hidden_lstm import LearnableHiddenTemporalDataset
-            test_dataset = LearnableHiddenTemporalDataset(test_years, all_years, "seq", historical_years=2)
-            test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
-        else:
-            test_dataset = TemporalDataset(test_years)
-            test_dataloader = DataLoader(test_dataset, batch_size=128, shuffle=False)
-    else:
-        # test_x = torch.tensor(np.load('../../processed_data/FLUXNET-CH4/temporal/test_data_x.npy'), dtype=torch.float32)
-        # test_y = torch.tensor(np.load('../../processed_data/FLUXNET-CH4/temporal/test_data_y.npy'), dtype=torch.float32)
-        # mean = torch.tensor(np.load('../../data/TEM-MDM/mean_vals.npy'))
-        # std = torch.tensor(np.load('../../data/TEM-MDM/std_vals.npy'))
-        # test_x = (test_x - mean) / std
-        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # test_dataset = Dataset(test_x.to(device), test_y.to(device))
-        # test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
-        if model_str == "learnable_hidden_fluxnet":
-            test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
-        else:
-            test_dataset = FluxnetBaselineDataset(config, mode='train')
-            test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
-
-    model.eval()
-    all_predictions = []
-    all_targets = []
-    with torch.no_grad():
-        if simulated:
-            if model_str == "hierarchy" or model_str == "mul-emb":
-                for batch_X_daily, batch_x_yearly, batch_y in test_dataloader:
-                    if torch.isnan(batch_X_daily).any():
-                        continue
-                    _, prediction = model(batch_X_daily, batch_x_yearly)
-                    break
-            elif model_str == "learnable_hidden_lstm":
-                for batch_X, historical_X, batch_y, historical_y in test_dataloader:
-                    if torch.isnan(batch_X).any():
-                        continue
-                    prediction, _, _  = model(batch_X, historical_X, historical_y)
-                    break
-            else:
-                for batch_X, batch_y in test_dataloader:
-                    _, prediction = model(batch_X)
-                    print("shape", prediction.shape, batch_y.shape)
-                    break
-            all_targets = batch_y.cpu()
-            all_predictions = prediction.cpu()
-        else:
-            # for batch_X, batch_y in test_dataloader:
-            #     _, prediction = model(batch_X)
-            #     all_predictions.append(prediction.cpu().numpy().reshape(-1))
-            #     all_targets.append(batch_y.cpu().numpy().reshape(-1))
-            if model_str == "lstm" or model_str == "cross":
-                for batch_x, batch_y in test_dataloader:
-                    _, predictions = model(batch_x)
-                    all_predictions.append(predictions.cpu().numpy().reshape(-1))
-                    all_targets.append(batch_y.cpu().numpy().reshape(-1))
-            else:
-                for batch_x_current, batch_historical_inputs, batch_y, batch_historical_targets, batch_file_idx in test_dataloader:
-                    predictions, _, _, _ = model(
-                        batch_x_current, 
-                        batch_historical_inputs, 
-                        batch_file_idx,
-                        batch_historical_targets
-                    )
-                    # predictions = predictions * train_dataset.y_std + train_dataset.y_mean
-                    predictions_log = predictions.cpu().numpy() * train_dataset.y_std + train_dataset.y_mean
-                    predictions = np.sign(predictions_log) * (np.exp(np.abs(predictions_log)) - 1)
-                    all_predictions.append(predictions.reshape(-1))
-                    all_targets.append(batch_y.cpu().numpy().reshape(-1))
-
-    if simulated:
-        plt.figure(figsize=(12, 4))
-        plt.plot(all_targets[index], label='Ground Truth')
-        plt.plot(all_predictions[index], label='Prediction')
-        plt.xlabel('Day of Year')
-        plt.ylabel('Value')
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        if simulated:
-            if model_str == "hierarchy" or model_str == "mul-emb":
-                plt.savefig(f'figure/prediction_TEM_{model_str}-{year}.png')
-            else:
-                plt.savefig(f'figure/no_intra_{index}.png')
-    else:
-        num_indices = len(all_predictions)
-        
-        print(f"Total number of observed indices: {num_indices}") 
-
-        if num_indices == 0:
-            print("No predictions to plot.")
-            return
-
-        cols = 3  
-        rows = math.ceil(num_indices / cols) 
-        
-        fig, axes = plt.subplots(rows, cols, figsize=(cols * 7, rows * 4), squeeze=False)
-        axes = axes.flatten() 
-
-
-        for i in range(num_indices):
-            site, year = test_dataset.samples[i]
-            ax = axes[i] 
-            ax.plot(all_targets[i], label='Ground Truth')
-            ax.plot(all_predictions[i], label='Prediction')
-            ax.set_title(f'Observed Data - {site} ({year})')
-            ax.set_xlabel('Day of Year')
-            ax.set_ylabel('Value')
-            ax.legend()
-            ax.grid(True)
-        
-
-        for j in range(num_indices, len(axes)):
-            axes[j].axis('off')
-
-        plt.tight_layout() 
-
-        plt.savefig(f'figure/obs_training_all.png')
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['Times New Roman']
 
 def draw_historical_sites(site_name):
     dataset = FluxnetBaselineDataset(config, mode='train')
@@ -233,16 +36,16 @@ def draw_historical_sites(site_name):
         if site == site_name:
             all_targets[year] = batch_y.cpu().numpy().reshape(-1)
     all_colors = [
-        'green',         # 1. 绿色 - LSTM
-        'orange',        # 2. 橙色 - Ps-LSTM
-        'purple',        # 3. 紫色 - transformer
-        'brown',         # 4. 棕色 - iTransformer
-        'pink',          # 5. 粉色 - Pyraformer
-        'gray',          # 6. 灰色 - TSMixer
-        'olive',         # 7. 橄榄色 - TimeMixer
-        'cyan',          # 8. 青色 - PatchTST
-        'gold',          # 9. 金色 - DUET
-        'red'            # 10. 红色 - CHAM-net
+        'green',         # 1. - LSTM
+        'orange',        # 2. - Ps-LSTM
+        'purple',        # 3. - transformer
+        'gray',         # 4. - iTransformer
+        'pink',          # 5. - Pyraformer
+        'gray',          # 6. - TSMixer
+        'olive',         # 7. - TimeMixer
+        'cyan',          # 8. - PatchTST
+        'gold',          # 9. - DUET
+        'red'            # 10. - CHAM-net
         ]
     # print(len(all_targets))
     # exit()
@@ -250,17 +53,58 @@ def draw_historical_sites(site_name):
     plt.figure(figsize=(12, 6))
     for i, (year, predictions) in enumerate(all_targets.items()):
         if predictions is not None:
-            plt.plot(predictions, label=f'{site_name}_{year}', linewidth=2, color=all_colors[i], alpha=0.8)
+            plt.plot(predictions, label=f'{site_name} ({year})', linewidth=2, color=all_colors[i], alpha=0.8)
     
-    plt.title(f'Historical Data for Site: {site_name}')
-    plt.xlabel('Day of Year')
-    plt.ylabel('Methane Flux')
-    plt.legend()
+    # plt.title(f'{site_name} Methane Emission from FLUXNET dataset', fontsize=18, fontweight='bold')
+    plt.xlabel('Day of Year', fontsize=26, fontweight='bold')
+    plt.ylabel('Methane Emission', fontsize=26, fontweight='bold')
+    plt.legend(fontsize=22)
+    plt.xticks(fontsize=24)
+    plt.yticks(fontsize=24)
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(f'figure/historical_{site_name}.png')
+    plt.savefig(f'figure/historical_{site_name}.pdf')
 
+
+def draw_pattern_scale(site_names: list, target_year: int):
+    dataset = FluxnetBaselineDataset(config, mode='train')
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
+
+    all_targets = {}
+    for i, (_, batch_y) in enumerate(dataloader):
+        site, year = dataset.samples[i]
+        if year == target_year and site in site_names:
+            all_targets[site] = batch_y.cpu().numpy().reshape(-1)
+    all_colors = [
+        'green',         # 1. - LSTM
+        'orange',        # 2. - Ps-LSTM
+        'purple',        # 3. - transformer
+        'gray',         # 4. - iTransformer
+        'pink',          # 5. - Pyraformer
+        'gray',          # 6. - TSMixer
+        'olive',         # 7. - TimeMixer
+        'cyan',          # 8. - PatchTST
+        'gold',          # 9. - DUET
+        'red'            # 10. - CHAM-net
+        ]
+    # print(len(all_targets))
+    # exit()
+    assert len(all_targets) < len(all_colors), "Not enough colors for the number of historical sites."
+    plt.figure(figsize=(12, 6))
+    for i, (site, predictions) in enumerate(all_targets.items()):
+        if predictions is not None:
+            plt.plot(predictions, label=f'{site} ({target_year})', linewidth=2, color=all_colors[i], alpha=0.8)
     
+    # plt.title(f'{site_name} Methane Emission from FLUXNET dataset', fontsize=18, fontweight='bold')
+    plt.xlabel('Day of Year', fontsize=26, fontweight='bold')
+    plt.ylabel('Methane Emission', fontsize=26, fontweight='bold')
+    plt.legend(fontsize=22)
+    plt.xticks(fontsize=24)
+    plt.yticks(fontsize=24)
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f'figure/pattern_scale.pdf')
+
 def compare_models_draw(simulated: bool, index: int = 0):
     # Prepare datasets
     if simulated:
@@ -426,7 +270,7 @@ def compare_models_draw(simulated: bool, index: int = 0):
         print("R2 scores for models:", R2_list)
         print("NRMSE scores for models:", nrmse_list)
     # Create comparison plot
-    plt.figure(figsize=(14, 6))
+    plt.figure(figsize=(12, 6))
     
     # Plot ground truth
     if ground_truth is not None:
@@ -441,16 +285,16 @@ def compare_models_draw(simulated: bool, index: int = 0):
     else:
         colors = ['green', 'purple', 'red']
     all_colors = [
-        'green',         # 1. 绿色 - LSTM
-        'orange',        # 2. 橙色 - Ps-LSTM
-        'purple',        # 3. 紫色 - transformer
-        'brown',         # 4. 棕色 - iTransformer
-        'pink',          # 5. 粉色 - Pyraformer
-        'gray',          # 6. 灰色 - TSMixer
-        'olive',         # 7. 橄榄色 - TimeMixer
-        'cyan',          # 8. 青色 - PatchTST
-        'gold',          # 9. 金色 - DUET
-        'red'            # 10. 红色 - CHAM-net
+        'green',         # 1. - LSTM
+        'orange',        # 2. - Ps-LSTM
+        'purple',        # 3. - transformer
+        'brown',         # 4. - iTransformer
+        'pink',          # 5. - Pyraformer
+        'gray',          # 6. - TSMixer
+        'olive',         # 7. - TimeMixer
+        'cyan',          # 8. - PatchTST
+        'gold',          # 9. - DUET
+        'red'            # 10. - CHAM-net
         ]
     for i, (model_name, predictions) in enumerate(all_model_predictions):
         if predictions is not None:
@@ -467,47 +311,45 @@ def compare_models_draw(simulated: bool, index: int = 0):
     
     # Add title based on dataset type
     if simulated:
-        plt.title(f'TEM dataset', fontsize=14, fontweight='bold')
+        plt.title(f'TEM dataset', fontsize=18, fontweight='bold')
     else:
         site, year = test_dataset.samples[index]
-        plt.title(f'FLUXNET dataset: {site} ({year})', fontsize=14, fontweight='bold')
+        plt.title(f'FLUXNET dataset: {site} ({year})', fontsize=18, fontweight='bold')
     
-    plt.xlabel('Day of Year', fontsize=12)
-    plt.ylabel('CH4 Emissions', fontsize=12)
-    plt.legend(loc='best', fontsize=10)
+    plt.xlabel('Day of Year', fontsize=18, fontweight='bold')
+    plt.ylabel('Methane Emission', fontsize=18, fontweight='bold')
+    plt.legend(loc='best', fontsize=16)
+    plt.xticks(fontsize=16)
+    plt.yticks(fontsize=16)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     
     # Save figure
     if simulated:
-        plt.savefig(f'figure/TEM_{index}.png', dpi=300)
-        print(f"Saved: figure/TEM_{index}.png")
+        plt.savefig(f'figure/TEM_{index}.pdf', dpi=300)
+        print(f"Saved: figure/TEM_{index}.pdf")
     else:
-        plt.savefig(f'figure/FLUXNET_{index}.png', dpi=300)
-        print(f"Saved: figure/FLUXNET_{index}.png")
+        plt.savefig(f'figure/FLUXNET_{index}.pdf', dpi=300)
+        print(f"Saved: figure/FLUXNET_{index}.pdf")
     
     plt.close()
 
-draw_historical_sites("DE.SfN")
-draw_historical_sites("FI.Lom")
-draw_historical_sites("US.Los")
 
+draw_pattern_scale(["DE.Hte", "US.Myb", "US.ORv"], 2013)
+draw_historical_sites("FI.Lom")
+
+# draw_historical_sites("DE.SfN")
+# draw_historical_sites("US.Los")
 # Draw comparisons for both simulated and observed data
 # print("Drawing simulated data comparison (index=0)...")
 # for i in range(19):
 #     compare_models_draw(simulated=True, index=i)
-# compare_models_draw(simulated=True, index=19)
+# compare_models_draw(simulated=True, index=14)
 
 # best 14
 
 # print("\nDrawing observed data comparison (index=3)...")
 # for i in range(19):
 #     compare_models_draw(simulated=False, index=i)
-# compare_models_draw(simulated=False, index=18)
-
-# best index: 0 1 2 3 4 5 6 8 10 12 14 15 
-# choose 14 for now, seems good [0.23908430337905884, -3.834561347961426, 0.4589861035346985, 0.44660162925720215, 0.5736039876937866] NRMSE: [np.float64(0.13204366874958218), np.float64(0.3328341164403951), np.float64(0.11134058880052077), np.float64(0.11260774315247449), np.float64(0.09884526203298415)]
-# choose 4, and 2, pattern and scale
-
-
-# yearly_draw("lstm", False, 4, 0)
+# compare_models_draw(simulated=False, index=2)
+# compare_models_draw(simulated=False, index=4)
