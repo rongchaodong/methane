@@ -57,7 +57,7 @@ def draw_historical_sites(site_name):
     
     # plt.title(f'{site_name} Methane Emission from FLUXNET dataset', fontsize=18, fontweight='bold')
     plt.xlabel('Day of Year', fontsize=26, fontweight='bold')
-    plt.ylabel('Methane Emission', fontsize=26, fontweight='bold')
+    plt.ylabel('CH4 Emission (mgCH4/m2/day)', fontsize=24, fontweight='bold')
     plt.legend(fontsize=22)
     plt.xticks(fontsize=24)
     plt.yticks(fontsize=24)
@@ -97,7 +97,7 @@ def draw_pattern_scale(site_names: list, target_year: int):
     
     # plt.title(f'{site_name} Methane Emission from FLUXNET dataset', fontsize=18, fontweight='bold')
     plt.xlabel('Day of Year', fontsize=26, fontweight='bold')
-    plt.ylabel('Methane Emission', fontsize=26, fontweight='bold')
+    plt.ylabel('CH4 Emission (mgCH4/m2/day)', fontsize=24, fontweight='bold')
     plt.legend(fontsize=22)
     plt.xticks(fontsize=24)
     plt.yticks(fontsize=24)
@@ -314,13 +314,13 @@ def compare_models_draw(simulated: bool, index: int = 0):
         plt.title(f'TEM dataset', fontsize=18, fontweight='bold')
     else:
         site, year = test_dataset.samples[index]
-        plt.title(f'FLUXNET dataset: {site} ({year})', fontsize=18, fontweight='bold')
+        # plt.title(f'FLUXNET dataset: {site} ({year})', fontsize=18, fontweight='bold')
     
-    plt.xlabel('Day of Year', fontsize=18, fontweight='bold')
-    plt.ylabel('Methane Emission', fontsize=18, fontweight='bold')
-    plt.legend(loc='best', fontsize=16)
-    plt.xticks(fontsize=16)
-    plt.yticks(fontsize=16)
+    plt.xlabel('Day of Year', fontsize=26, fontweight='bold')
+    plt.ylabel('Methane Emission', fontsize=26, fontweight='bold')
+    plt.legend(loc='best', fontsize=22)
+    plt.xticks(fontsize=24)
+    plt.yticks(fontsize=24)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     
@@ -344,7 +344,7 @@ draw_historical_sites("FI.Lom")
 # print("Drawing simulated data comparison (index=0)...")
 # for i in range(19):
 #     compare_models_draw(simulated=True, index=i)
-# compare_models_draw(simulated=True, index=14)
+# compare_models_draw(simulated=False, index=4)
 
 # best 14
 
